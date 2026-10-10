@@ -59,7 +59,9 @@ if (Test-Path -LiteralPath $python) {
 }
 git -C $PSScriptRoot rev-parse HEAD | Set-Content (Join-Path $destination 'git-commit.txt')
 git -C $PSScriptRoot status --short | Set-Content (Join-Path $destination 'git-status.txt')
-Get-ChildItem -LiteralPath $destination -File -Recurse | ForEach-Object {
+$checksumFiles = @(Get-ChildItem -LiteralPath $destination -File -Recurse |
+    Where-Object { $_.Name -ne 'checksums.csv' })
+$checksumFiles | ForEach-Object {
     [pscustomobject]@{
         RelativePath = $_.FullName.Substring($destination.Length + 1)
         Bytes = $_.Length
