@@ -15,9 +15,10 @@ import pytensor.tensor as pt
 from scipy.linalg import helmert
 from scipy.optimize import minimize
 from scipy.special import ndtr, expit
+from scipy.stats import binom
 
 from mmm_data import (
-    CHANNELS, PRODUCTS, TIERS, CONTROL_NAMES, HILL_POWER, MAX_LAG, UNIT_COST,
+    CHANNELS, PRODUCTS, TIERS, CONTROL_NAMES, MAX_LAG,
     CONTRIBUTION_MARGIN_RATE,
     generate_data, lagged_exposures, media_features, prepare_data, save_data,
     expected_fulfilled_units,
@@ -35,11 +36,13 @@ PROFIT_SCENARIOS = 512
 def build_model(data, train_weeks):
     data["train_weeks"] = train_weeks
     train = np.flatnonzero(data["week"] < train_weeks)
+    channels = data["channels"]
+    carry_indices = data["carry_indices"]
     product_contrast = helmert(len(PRODUCTS), full=False).T
     tier_contrast = helmert(len(TIERS), full=False).T
     lagged, valid = lagged_exposures(data["ratio"])
     coords = {
-        "channel": CHANNELS, "carry_channel": CHANNELS[:4],
+        "channel": channels, "carry_channel": [channels[index] for index in carry_indices],
         "product": PRODUCTS, "tier": TIERS, "control": CONTROL_NAMES,
         "observation": np.arange(len(data["frame"])),
         "train_observation": train,
@@ -79,14 +82,17 @@ def build_model(data, train_weeks):
             dims="control",
         )
         carry_decay = pm.Beta("carry_decay", 2, 2, dims="carry_channel")
-        decay = pm.Deterministic("decay", pt.concatenate([carry_decay, pt.zeros(1)]), dims="channel")
+        decay = pm.Deterministic(
+            "decay", pt.set_subtensor(pt.zeros(len(channels))[carry_indices], carry_decay),
+            dims="channel",
+        )
         half = pm.LogNormal("half_saturation", 0, 0.6, dims="channel")
         media_beta = pm.HalfNormal("media_beta", 0.8, dims="channel")
         if data["hierarchical_media"]:
             media_product_sd = pm.HalfNormal("media_product_sd", 0.3, dims="channel")
             media_product_raw = pm.Normal(
                 "media_product_raw", 0, 1,
-                shape=(len(PRODUCTS) - 1, len(CHANNELS)),
+                shape=(len(PRODUCTS) - 1, len(channels)),
             )
             product_media_beta = pm.Deterministic(
                 "product_media_beta",
@@ -97,11 +103,13 @@ def build_model(data, train_weeks):
         else:
             observation_media_beta = media_beta
         weights = carry_decay[None, :] ** np.arange(MAX_LAG)[:, None]
-        carried = pt.sum(lagged[:, :, :, :4] * weights[None, None, :, :], axis=2)
+        carried = pt.sum(lagged[:, :, :, carry_indices] * weights[None, None, :, :], axis=2)
         carried = carried / pt.dot(valid, weights)[None, :, :]
-        adstock = pt.concatenate([carried, data["ratio"][:, :, 4:5]], axis=2)
-        powered = adstock ** HILL_POWER
-        features = powered / (powered + half ** HILL_POWER)
+        adstock = pt.as_tensor_variable(data["ratio"])
+        adstock = pt.set_subtensor(adstock[:, :, carry_indices], carried)
+        hill_power = data["hill_power"]
+        powered = adstock ** hill_power
+        features = powered / (powered + half ** hill_power)
         if data["funnel"]:
             search_intercept = pm.Normal(
                 "search_intercept", np.log(data["search_counts"][:, :train_weeks]).mean(axis=1),
@@ -132,6 +140,50 @@ def build_model(data, train_weeks):
             click_ratio = pt.exp(search_log_mean) * capture / data["reference"][:, 4:5]
             click_feature = click_ratio / (click_ratio + half[4])
             features = pt.concatenate([features[:, :, :4], click_feature[:, :, None]], axis=2)
+        if data["amazon"]:
+            amazon_search_intercept = pm.Normal(
+                "amazon_search_intercept",
+                np.log(data["amazon_search_counts"][:, :train_weeks]).mean(axis=1),
+                0.8, dims="product",
+            )
+            amazon_search_control_beta = pm.Normal(
+                "amazon_search_control_beta", 0, 1, shape=4,
+            )
+            amazon_search_sigma = pm.HalfNormal("amazon_search_sigma", 0.2)
+            amazon_click_max_rate = pm.Beta("amazon_click_max_rate", 2, 5)
+            amazon_click_budget_half = pm.LogNormal("amazon_click_budget_half", 0, 0.6)
+            amazon_search_log_mean = (
+                amazon_search_intercept[:, None]
+                + pt.sum(data["amazon_search_controls"] * amazon_search_control_beta, axis=2)
+            )
+            pm.Normal(
+                "amazon_log_search", mu=amazon_search_log_mean[:, :train_weeks],
+                sigma=amazon_search_sigma,
+                observed=np.log(data["amazon_search_counts"][:, :train_weeks]),
+            )
+            amazon_capture = (
+                amazon_click_max_rate * data["amazon_budget_ratio"]
+                / (data["amazon_budget_ratio"] + amazon_click_budget_half)
+            )
+            amazon_active = data["amazon_budget_ratio"][:, :train_weeks] > 0
+            pm.Binomial(
+                "amazon_paid_clicks",
+                n=data["amazon_search_counts"][:, :train_weeks][amazon_active],
+                p=amazon_capture[:, :train_weeks][amazon_active],
+                observed=data["amazon_click_counts"][:, :train_weeks][amazon_active],
+            )
+            amazon_search_index = channels.index("amazon_search")
+            amazon_click_ratio = (
+                pt.exp(amazon_search_log_mean) * amazon_capture
+                / data["reference"][:, amazon_search_index:amazon_search_index + 1]
+            )
+            amazon_click_feature = amazon_click_ratio / (
+                amazon_click_ratio + half[amazon_search_index]
+            )
+            features = pt.concatenate([
+                features[:, :, :amazon_search_index], amazon_click_feature[:, :, None],
+                features[:, :, amazon_search_index + 1:],
+            ], axis=2)
         base = (
             intercept + product_effect[data["product"]] + tier_effect[data["tier"]]
             + interaction[data["product"], data["tier"]]
@@ -259,6 +311,11 @@ def extract_samples(dataset):
             "search_intercept", "search_ctv_beta", "search_control_beta", "search_sigma",
             "click_max_rate", "click_budget_half",
         ])
+    if "amazon_search_intercept" in dataset:
+        names.extend([
+            "amazon_search_intercept", "amazon_search_control_beta", "amazon_search_sigma",
+            "amazon_click_max_rate", "amazon_click_budget_half",
+        ])
     for name in names:
         variable = dataset[name].transpose("chain", "draw", ...)
         result[name] = variable.values.reshape((-1,) + variable.shape[2:])
@@ -289,11 +346,18 @@ def response_features(samples, data):
     weights = samples["decay"][:, None, :] ** np.arange(MAX_LAG)[None, :, None]
     adstock = np.einsum("ptlc,dlc->dptc", lagged, weights)
     adstock /= np.einsum("tl,dlc->dtc", valid, weights)[:, None, :, :]
-    powered = adstock ** HILL_POWER
-    feature = powered / (powered + samples["half_saturation"][:, None, None, :] ** HILL_POWER)
+    hill_power = data["hill_power"]
+    powered = adstock ** hill_power
+    feature = powered / (powered + samples["half_saturation"][:, None, None, :] ** hill_power)
     if data["funnel"]:
         _, click_ratio = funnel_predictions(samples, data, feature[:, :, :, 3])
         feature[:, :, :, 4] = click_ratio / (click_ratio + samples["half_saturation"][:, None, None, 4])
+    if data["amazon"]:
+        _, click_ratio = amazon_search_predictions(samples, data)
+        amazon_search_index = data["channels"].index("amazon_search")
+        feature[:, :, :, amazon_search_index] = click_ratio / (
+            click_ratio + samples["half_saturation"][:, None, None, amazon_search_index]
+        )
     return feature
 
 
@@ -335,10 +399,30 @@ def funnel_predictions(samples, data, ctv_feature):
     return log_search, np.exp(log_search) * capture / data["reference"][None, :, 4:5]
 
 
+def amazon_search_predictions(samples, data):
+    log_search = (
+        samples["amazon_search_intercept"][:, :, None]
+        + np.einsum(
+            "dk,ptk->dpt", samples["amazon_search_control_beta"],
+            data["amazon_search_controls"],
+        )
+    )
+    capture = funnel_click_probability(
+        data["amazon_budget_ratio"], samples["amazon_click_max_rate"],
+        samples["amazon_click_budget_half"],
+    )
+    index = data["channels"].index("amazon_search")
+    click_ratio = np.exp(log_search) * capture / data["reference"][None, :, index:index + 1]
+    return log_search, click_ratio
+
+
 def product_media_coefficients(samples):
     if "product_media_beta" in samples:
         return samples["product_media_beta"]
-    return np.broadcast_to(samples["media_beta"][:, None, :], (len(samples["sigma"]), len(PRODUCTS), len(CHANNELS)))
+    return np.broadcast_to(
+        samples["media_beta"][:, None, :],
+        (len(samples["sigma"]), len(PRODUCTS), samples["media_beta"].shape[-1]),
+    )
 
 
 def predictions(samples, data):
@@ -346,14 +430,21 @@ def predictions(samples, data):
     weights = samples["decay"][:, None, :] ** np.arange(MAX_LAG)[None, :, None]
     adstock = np.einsum("ptlc,dlc->dptc", lagged, weights)
     adstock /= np.einsum("tl,dlc->dtc", valid, weights)[:, None, :, :]
-    powered = adstock ** HILL_POWER
-    feature = powered / (powered + samples["half_saturation"][:, None, None, :] ** HILL_POWER)
+    hill_power = data["hill_power"]
+    powered = adstock ** hill_power
+    feature = powered / (powered + samples["half_saturation"][:, None, None, :] ** hill_power)
     if data["funnel"]:
         _, click_ratio = funnel_predictions(samples, data, feature[:, :, :, 3])
         _, no_ctv_click_ratio = funnel_predictions(samples, data, np.zeros_like(feature[:, :, :, 3]))
         click_feature = click_ratio / (click_ratio + samples["half_saturation"][:, None, None, 4])
         no_ctv_click_feature = no_ctv_click_ratio / (no_ctv_click_ratio + samples["half_saturation"][:, None, None, 4])
         feature[:, :, :, 4] = click_feature
+    if data["amazon"]:
+        _, amazon_click_ratio = amazon_search_predictions(samples, data)
+        amazon_search_index = data["channels"].index("amazon_search")
+        feature[:, :, :, amazon_search_index] = amazon_click_ratio / (
+            amazon_click_ratio + samples["half_saturation"][:, None, None, amazon_search_index]
+        )
     coefficients = product_media_coefficients(samples)[:, data["product"], :]
     effects = feature[:, data["product"], data["week"], :] * coefficients
     if data["funnel"]:
@@ -482,11 +573,12 @@ def forecast_outputs(samples, data, train_weeks, output, seed):
 
 
 def parameter_recovery(samples, truth, output):
+    channels = truth.get("channels", CHANNELS)
     rows = []
     for name in ["media_beta", "decay", "half_saturation", "control_beta"]:
-        labels = CHANNELS if name != "control_beta" else CONTROL_NAMES
+        labels = channels if name != "control_beta" else CONTROL_NAMES
         for index, label in enumerate(labels):
-            if name == "decay" and label == "paid_search":
+            if name == "decay" and label in {"paid_search", "amazon_search"}:
                 continue
             values = samples[name][:, index]
             lower, upper = np.quantile(values, [0.05, 0.95])
@@ -515,7 +607,7 @@ def parameter_recovery(samples, truth, output):
     if "product_media_beta" in samples:
         product_rows = []
         for product, product_name in enumerate(PRODUCTS):
-            for channel, channel_name in enumerate(CHANNELS):
+            for channel, channel_name in enumerate(channels):
                 draws = samples["product_media_beta"][:, product, channel]
                 lower, upper = np.quantile(draws, [0.05, 0.95])
                 known = truth["product_media_beta"][product][channel]
@@ -532,7 +624,7 @@ def parameter_recovery(samples, truth, output):
         product_table = pd.DataFrame(product_rows)
         product_table.to_csv(output / "product_media_recovery.csv", index=False)
         scale_rows = []
-        for channel, name in enumerate(CHANNELS):
+        for channel, name in enumerate(channels):
             values = samples["media_product_sd"][:, channel]
             lower, upper = np.quantile(values, [0.05, 0.95])
             scale_rows.append({
@@ -623,6 +715,72 @@ def funnel_outputs(samples, data, truth, train_weeks, output, seed):
     return metrics
 
 
+def amazon_search_outputs(samples, data, truth, train_weeks, output, seed):
+    log_search, _ = amazon_search_predictions(samples, data)
+    capture = funnel_click_probability(
+        data["amazon_budget_ratio"], samples["amazon_click_max_rate"],
+        samples["amazon_click_budget_half"],
+    )
+    rng = np.random.default_rng(seed)
+    search_draws = np.maximum(1, np.rint(
+        np.exp(rng.normal(log_search, samples["amazon_search_sigma"][:, None, None]))
+    )).astype(np.int64)
+    click_draws = rng.binomial(search_draws, capture)
+    test = slice(train_weeks, len(data["weeks"]))
+    rows = []
+    metrics = {}
+    for name, observed, draws in [
+        ("amazon_search_opportunities", data["amazon_search_counts"], search_draws),
+        ("amazon_paid_clicks", data["amazon_click_counts"], click_draws),
+    ]:
+        lower, upper = np.quantile(draws, [0.05, 0.95], axis=0)
+        mean = draws.mean(axis=0)
+        error = np.log1p(mean[:, test]) - np.log1p(observed[:, test])
+        metrics[f"{name}_holdout_log_rmse"] = float(np.sqrt(np.mean(error**2)))
+        metrics[f"{name}_holdout_coverage_90"] = float(np.mean(
+            (observed[:, test] >= lower[:, test]) & (observed[:, test] <= upper[:, test])
+        ))
+        for product, product_name in enumerate(PRODUCTS):
+            for week, date in enumerate(data["weeks"]):
+                rows.append({
+                    "mediator": name, "product": product_name, "week": date,
+                    "split": "train" if week < train_weeks else "holdout",
+                    "observed": int(observed[product, week]),
+                    "predicted_mean": float(mean[product, week]),
+                    "p05": float(lower[product, week]), "p95": float(upper[product, week]),
+                })
+    pd.DataFrame(rows).to_csv(output / "amazon_mediator_predictions.csv", index=False)
+    recovery = []
+    for name in ["amazon_click_max_rate", "amazon_click_budget_half", "amazon_search_sigma"]:
+        draws = samples[name]
+        lower, upper = np.quantile(draws, [0.05, 0.95])
+        known = truth[name]
+        error = abs(float(draws.mean()) - known) / known
+        metrics[f"{name}_relative_error"] = error
+        recovery.append({
+            "parameter": name, "truth": known, "estimate": float(draws.mean()),
+            "p05": float(lower), "p95": float(upper), "relative_error": error,
+            "truth_in_90_interval": bool(lower <= known <= upper),
+        })
+    pd.DataFrame(recovery).to_csv(output / "amazon_search_recovery.csv", index=False)
+    spend_error = np.max(np.abs(
+        data["frame"].amazon_search_spend.to_numpy()
+        - data["frame"].amazon_search_exposure.to_numpy() * data["unit_cost"][data["channels"].index("amazon_search")]
+    ))
+    metrics["cpc_spend_reconciliation_error"] = float(spend_error)
+    metrics["pass"] = bool(
+        metrics["amazon_search_opportunities_holdout_log_rmse"] < 0.20
+        and metrics["amazon_paid_clicks_holdout_log_rmse"] < 0.20
+        and 0.85 <= metrics["amazon_search_opportunities_holdout_coverage_90"] <= 0.97
+        and 0.85 <= metrics["amazon_paid_clicks_holdout_coverage_90"] <= 0.99
+        and all(metrics[f"{name}_relative_error"] < 0.20 for name in [
+            "amazon_click_max_rate", "amazon_click_budget_half", "amazon_search_sigma",
+        ])
+        and spend_error < 1e-8
+    )
+    return metrics
+
+
 def brand_state_outputs(samples, data, truth, train_weeks, output, seed):
     state, latent_score, effect, state_variance = brand_predictions(
         samples, data, include_variance=True
@@ -666,7 +824,7 @@ def brand_state_outputs(samples, data, truth, train_weeks, output, seed):
         if values.ndim == 1:
             values = values[:, None]
         known_values = np.atleast_1d(truth[name])
-        labels = CHANNELS if name == "brand_media_beta" else [name]
+        labels = truth.get("channels", CHANNELS) if name == "brand_media_beta" else [name]
         for index, known in enumerate(known_values):
             draws = values[:, index]
             low, high = np.quantile(draws, [0.05, 0.95])
@@ -718,6 +876,12 @@ def truth_samples(truth):
     if "search_ctv_beta" in truth:
         for name in ["search_intercept", "search_ctv_beta", "search_control_beta", "search_sigma", "click_max_rate", "click_budget_half"]:
             result[name] = np.asarray([truth[name]], dtype=float)
+    if "amazon_search_intercept" in truth:
+        for name in [
+            "amazon_search_intercept", "amazon_search_control_beta", "amazon_search_sigma",
+            "amazon_click_max_rate", "amazon_click_budget_half",
+        ]:
+            result[name] = np.asarray([truth[name]], dtype=float)
     if "product_media_beta" in truth:
         result["product_media_beta"] = np.asarray([truth["product_media_beta"]], dtype=float)
     if "brand_persistence" in truth:
@@ -747,7 +911,8 @@ def attribution_outputs(samples, data, truth, expected, base, effects, train_wee
         if inventory is None
         else frame.truth_expected_fulfilled_units.to_numpy()
     )
-    truth_effects = frame[[f"truth_{name}_log_effect" for name in CHANNELS]].to_numpy()
+    channels = data["channels"]
+    truth_effects = frame[[f"truth_{name}_log_effect" for name in channels]].to_numpy()
     truth_weights = np.divide(
         truth_effects, truth_effects.sum(axis=1, keepdims=True),
         out=np.zeros_like(truth_effects), where=truth_effects.sum(axis=1, keepdims=True) > 1e-12,
@@ -763,14 +928,14 @@ def attribution_outputs(samples, data, truth, expected, base, effects, train_wee
         )
         table["baseline_without_brand_units"] = without_brand.mean(axis=0)
         table["brand_baseline_incremental_units"] = (baseline - without_brand).mean(axis=0)
-    for channel, name in enumerate(CHANNELS):
+    for channel, name in enumerate(channels):
         table[f"{name}_allocated_units"] = allocated[:, :, channel].mean(axis=0)
         table[f"{name}_truth_allocated_units"] = truth_allocated[:, channel]
     table.to_csv(output / "unit_decomposition.csv", index=False)
     rows = []
     for split in ["train", "holdout"]:
         selected = table.split.to_numpy() == split
-        for channel, name in enumerate(CHANNELS):
+        for channel, name in enumerate(channels):
             draw_totals = allocated[:, selected, channel].sum(axis=1)
             planted = float(truth_allocated[selected, channel].sum())
             mean = float(draw_totals.mean())
@@ -792,7 +957,7 @@ def planning_context(samples, data, train_weeks, horizon=13,
     rng = np.random.default_rng(seed)
     selected = (data["week"] >= train_weeks) & (data["week"] < train_weeks + horizon)
     history = data["ratio"][:, train_weeks - MAX_LAG + 1:train_weeks, :]
-    padded = np.concatenate([history, np.zeros((len(PRODUCTS), horizon, len(CHANNELS)))], axis=1)
+    padded = np.concatenate([history, np.zeros((len(PRODUCTS), horizon, len(data["channels"])))], axis=1)
     lagged, valid = lagged_exposures(padded)
     lagged = lagged[:, -horizon:, :, :]
     weights = samples["decay"][:, None, :] ** np.arange(MAX_LAG)[None, :, None]
@@ -809,9 +974,21 @@ def planning_context(samples, data, train_weeks, horizon=13,
         "inventory": data["inventory"][selected] if data["inventory"] is not None else None,
         "funnel": data["funnel"],
         "search_controls": data["search_controls"][:, train_weeks:train_weeks + horizon, :] if data["funnel"] else None,
+        "amazon": data["amazon"],
+        "amazon_search_controls": data["amazon_search_controls"][:, train_weeks:train_weeks + horizon, :] if data["amazon"] else None,
         "reference": data["reference"],
+        "unit_cost": data["unit_cost"],
+        "channels": data["channels"],
+        "hill_power": data["hill_power"],
         "brand_state": data["brand_state"],
     }
+    if data["amazon"]:
+        result["amazon_search_standard_normal"] = rng.normal(
+            size=(len(samples["sigma"]), len(PRODUCTS), horizon)
+        )
+        result["amazon_click_uniform"] = rng.uniform(
+            size=(len(samples["sigma"]), len(PRODUCTS), horizon)
+        )
     if data["brand_state"]:
         state, _, _, state_variance = brand_predictions(
             samples, data, include_variance=True
@@ -832,9 +1009,11 @@ def planning_context(samples, data, train_weeks, horizon=13,
 
 def scenario_log_means(context, exposure_ratio):
     samples = context["samples"]
-    adstock = context["historical"] + context["future_fraction"][:, None, :, :] * exposure_ratio[None, None, None, :5]
-    powered = adstock ** HILL_POWER
-    features = powered / (powered + samples["half_saturation"][:, None, None, :] ** HILL_POWER)
+    channel_count = len(context["channels"])
+    adstock = context["historical"] + context["future_fraction"][:, None, :, :] * exposure_ratio[None, None, None, :channel_count]
+    hill_power = context["hill_power"]
+    powered = adstock ** hill_power
+    features = powered / (powered + samples["half_saturation"][:, None, None, :] ** hill_power)
     if context["funnel"]:
         log_search = funnel_search_log_mean(
             features[:, :, :, 3], context["search_controls"], samples["search_intercept"],
@@ -846,10 +1025,29 @@ def scenario_log_means(context, exposure_ratio):
         )
         click_ratio = np.exp(log_search) * capture / context["reference"][None, :, 4:5]
         features[:, :, :, 4] = click_ratio / (click_ratio + samples["half_saturation"][:, None, None, 4])
+    if context["amazon"]:
+        amazon_search_index = context["channels"].index("amazon_search")
+        log_search = (
+            samples["amazon_search_intercept"][:, :, None]
+            + np.einsum(
+                "dk,ptk->dpt", samples["amazon_search_control_beta"],
+                context["amazon_search_controls"],
+            )
+        )
+        capture = funnel_click_probability(
+            np.full(features.shape[1:3], exposure_ratio[amazon_search_index]),
+            samples["amazon_click_max_rate"], samples["amazon_click_budget_half"],
+        )
+        click_ratio = np.exp(log_search) * capture / context["reference"][
+            None, :, amazon_search_index:amazon_search_index + 1
+        ]
+        features[:, :, :, amazon_search_index] = click_ratio / (
+            click_ratio + samples["half_saturation"][:, None, None, amazon_search_index]
+        )
     media = (features * product_media_coefficients(samples)[:, :, None, :]).sum(axis=3)
     mu = context["base"] + media[:, context["product"], context["week"]]
     if context["brand_state"]:
-        sponsor_ratio = np.full(features.shape[1:3], exposure_ratio[5])
+        sponsor_ratio = np.full(features.shape[1:3], exposure_ratio[channel_count])
         target = brand_target(samples, features, sponsor_ratio, context["distribution_fraction"])
         innovations = context.get("brand_process_innovations")
         state = persistent_brand_state(
@@ -888,10 +1086,46 @@ def scenario_fulfilled_units(context, exposure_ratio):
     return expected_fulfilled_units(mu, samples["sigma"][:, None], context["inventory"])
 
 
+def scenario_amazon_search_spend(context, exposure_ratio):
+    samples = context["samples"]
+    index = context["channels"].index("amazon_search")
+    search_log_mean = (
+        samples["amazon_search_intercept"][:, :, None]
+        + np.einsum(
+            "dk,ptk->dpt", samples["amazon_search_control_beta"],
+            context["amazon_search_controls"],
+        )
+    )
+    capture = funnel_click_probability(
+        np.full(search_log_mean.shape[1:], exposure_ratio[index]),
+        samples["amazon_click_max_rate"], samples["amazon_click_budget_half"],
+    )
+    search_counts = np.maximum(1, np.rint(np.exp(
+        search_log_mean
+        + samples["amazon_search_sigma"][:, None, None]
+        * context["amazon_search_standard_normal"]
+    ))).astype(np.int64)
+    paid_clicks = binom.ppf(
+        context["amazon_click_uniform"], search_counts, capture
+    ).astype(np.int64)
+    return paid_clicks.sum(axis=(1, 2)) * context["unit_cost"][index]
+
+
+def scenario_media_spend(context, exposure_ratio, cost_reference):
+    samples = context["samples"]
+    planned_spend = float(np.sum(exposure_ratio * cost_reference) * context["horizon"])
+    if context["amazon"]:
+        index = context["channels"].index("amazon_search")
+        planned_search_spend = exposure_ratio[index] * cost_reference[index] * context["horizon"]
+        planned_spend += scenario_amazon_search_spend(context, exposure_ratio) - planned_search_spend
+        return planned_spend
+    return np.full(len(samples["sigma"]), planned_spend)
+
+
 def scenario_expected_profit_draws(context, exposure_ratio, budget_week, cost_reference):
     fulfilled = scenario_fulfilled_units(context, exposure_ratio)
     contribution = (fulfilled * context["contribution_per_unit"][None, :]).sum(axis=1)
-    spend = float(np.sum(exposure_ratio * cost_reference) * context["horizon"])
+    spend = scenario_media_spend(context, exposure_ratio, cost_reference)
     return contribution - spend
 
 
@@ -903,7 +1137,7 @@ def scenario_profit_draws(context, exposure_ratio, budget_week, cost_reference):
     if context["inventory"] is not None:
         fulfilled = np.minimum(fulfilled, context["inventory"])
     contribution = (fulfilled * context["contribution_per_unit"][None, :]).sum(axis=1)
-    spend = float(np.sum(exposure_ratio * cost_reference) * context["horizon"])
+    spend = scenario_media_spend(context, exposure_ratio, cost_reference)
     return contribution - spend
 
 
@@ -986,6 +1220,16 @@ def profit_optimization_outputs(samples, data, train_weeks, output, horizon,
         "expected_profit": expected_share * budget_week / cost_reference,
         "risk_adjusted": risk_adjusted_share * budget_week / cost_reference,
     }
+    charged_spend = {
+        name: ratio * cost_reference * horizon for name, ratio in ratios.items()
+    }
+    if data["amazon"]:
+        amazon_search_index = data["channels"].index("amazon_search")
+        for name, ratio in ratios.items():
+            charged_spend[name] = charged_spend[name].copy()
+            charged_spend[name][amazon_search_index] = scenario_amazon_search_spend(
+                context, ratio
+            ).mean()
     expected_profit = {
         name: scenario_expected_profit_draws(context, ratio, budget_week, cost_reference)
         for name, ratio in ratios.items()
@@ -1000,13 +1244,16 @@ def profit_optimization_outputs(samples, data, train_weeks, output, horizon,
         for name, draws in predictive_profit.items()
     }
     table = pd.DataFrame({
-        "channel": list(CHANNELS) + (["sponsorship"] if data["brand_state"] else []),
+        "channel": list(data["channels"]) + (["sponsorship"] if data["brand_state"] else []),
         "baseline_share": baseline_share,
         "expected_profit_share": expected_share,
         "risk_adjusted_share": risk_adjusted_share,
         "baseline_13week_spend": baseline_share * budget_week * horizon,
         "expected_profit_13week_spend": expected_share * budget_week * horizon,
         "risk_adjusted_13week_spend": risk_adjusted_share * budget_week * horizon,
+        "baseline_expected_charged_spend_13week": charged_spend["baseline"],
+        "expected_profit_expected_charged_spend_13week": charged_spend["expected_profit"],
+        "risk_adjusted_expected_charged_spend_13week": charged_spend["risk_adjusted"],
         "lower_share_bound": lower,
         "upper_share_bound": upper,
     })
@@ -1044,9 +1291,14 @@ def optimization_outputs(samples, data, truth, train_weeks, output):
     posterior = planning_context(select_samples(samples, 128), data, train_weeks, horizon)
     oracle = planning_context(truth_samples(truth), data, train_weeks, horizon)
     training_ratio = data["ratio"][:, train_weeks - 26:train_weeks, :].mean(axis=1)
-    cost_reference = (data["reference"] * UNIT_COST).sum(axis=0)
-    baseline_weekly_spend = (training_ratio * data["reference"] * UNIT_COST).sum(axis=0)
-    allocation_channels = list(CHANNELS)
+    cost_reference = (data["reference"] * data["unit_cost"]).sum(axis=0)
+    baseline_weekly_spend = (training_ratio * data["reference"] * data["unit_cost"]).sum(axis=0)
+    if data["amazon"]:
+        amazon_search_index = data["channels"].index("amazon_search")
+        baseline_weekly_spend[amazon_search_index] = data["amazon_search_spend"][:, train_weeks - 26:train_weeks].sum(axis=0).mean()
+        mean_budget_activity = data["amazon_budget_ratio"][:, train_weeks - 26:train_weeks].mean()
+        cost_reference[amazon_search_index] = baseline_weekly_spend[amazon_search_index] / mean_budget_activity
+    allocation_channels = list(data["channels"])
     if data["brand_state"]:
         sponsorship_cost = data["sponsorship_reference"] * truth["sponsorship_cpm"] / 1000
         cost_reference = np.append(cost_reference, sponsorship_cost.sum())
@@ -1131,7 +1383,8 @@ def write_charts(output, train_weeks):
     plt.close(fig)
     curves = pd.read_csv(output / "response_curves.csv")
     curve_channels = curves.channel.unique().tolist()
-    fig, axes = plt.subplots(2, 3, figsize=(12, 7))
+    rows = int(np.ceil(len(curve_channels) / 3))
+    fig, axes = plt.subplots(rows, 3, figsize=(12, 3.5 * rows), squeeze=False)
     for axis, name in zip(axes.flat, curve_channels):
         curve = curves[curves.channel == name]
         spend = curve.channel_13week_spend / 1000
@@ -1190,11 +1443,12 @@ Status: **{status}**. This is a controlled synthetic prototype, not a real-data 
 
 ## Workflow
 
-1. Generate {args.weeks} weeks, four products, three tiers, and five independently scheduled channels.
+1. Generate {args.weeks} weeks, four products, three tiers, and {5 + (2 if args.amazon else 0)} media channels.
 2. Fit the first {args.weeks - args.holdout_weeks} weeks with hierarchical product/tier intercepts,
    price, macro, base-price growth, promotion, post-promotion dip, PrimeDays, and annual seasonality.
-3. Estimate channel coefficients, saturation, and independent adstock for Display, Video, Social, and CTV.
-   Paid-search clicks have no adstock. Social has a fixed S-shaped Hill power of 2; other powers are 1.
+3. Estimate channel coefficients and saturation. Display, Video, Social, CTV, and optional Amazon Display
+    use independent adstock; paid-search and optional Amazon Search clicks have no adstock. Social has
+    a fixed S-shaped Hill power of 2; other powers are 1.
 4. Predict the final {args.holdout_weeks} weeks conditional on their supplied media and nonmedia inputs.
 5. Compare estimated parameters and allocated contributions with the predeclared synthetic truth.
 6. Allocate a 13-week budget using known CPM/CPC mappings, recent carryover, and identical fitted/truth constraints.
@@ -1222,7 +1476,7 @@ it does not establish robustness to model misspecification or endogenous real-wo
 
 Gates were specified in code before fitting: R-hat below 1.01, bulk ESS at least 400,
 tail ESS at least 200, no divergences or depth-cap hits; forecast beats benchmark with
-coverage between 85% and 97%; at least four of five media truths covered, maximum
+coverage between 85% and 97%; at least four of {recovery['media_total']} media truths covered, maximum
 media coefficient error 25%, decay error 0.10; contribution error 25%; budget conserved
 and fitted allocation within 2% of the best known-truth objective found under the same constraints.
 One synthetic seed is a demonstration, not a calibration study across datasets.
@@ -1277,6 +1531,10 @@ and brand process shocks when enabled. Fixed total spend is held constant; futur
 and inventory are supplied. Taxes, returns, fulfillment/fixed costs, uncertain media prices, and
 value beyond the 13-week horizon are excluded. This is a synthetic decision demonstration, not
 validated business profit or a global-optimum guarantee.
+
+When Amazon is enabled, its planned Search allocation is a spend cap/activity input. Scenario CPC
+charges are expected paid clicks times the synthetic $2 CPC; unspent cap remains unspent. The profit
+allocation CSV reports planned budget and expected charged spend separately.
 
 - Expected net profit: baseline ${profit['expected_profit_baseline']:,.0f}; optimized ${profit['expected_profit_optimized']:,.0f}.
 - 5% predictive profit CVaR: baseline ${profit['predictive_profit_cvar_5_baseline']:,.0f};
@@ -1358,6 +1616,31 @@ Funnel gates were set before this fit: mediator holdout log RMSE below 0.20; sea
 log-lift error below 25%; search CTV effect and both click-capture parameter errors below 20%.
 Stockout censoring in this run: {args.stockouts}. {'Sales likelihoods and planning use inventory caps after funnel-driven demand.' if args.stockouts else 'This isolates funnel behavior without inventory constraints.'}
 """
+        if args.amazon:
+                amazon = results["amazon"]
+                text += f"""
+## Amazon Sponsored Channels
+
+Amazon Display is generated as impression exposure and priced at a synthetic $14 CPM. Amazon Search
+generates on-platform query opportunities from exogenous organic demand and controls; paid clicks are
+Binomial with spend-dependent capture. The sales model uses expected clicks as a saturated media
+feature, not observed holdout clicks. Amazon Search has a synthetic $2 CPC: realized synthetic spend
+equals paid clicks times CPC, so zero clicks produce zero click charges. The budget-activity input is
+kept separately from realized CPC spend. These assumptions are illustrative and are not Amazon billing
+or attribution data.
+
+- Amazon Search opportunity holdout log RMSE: {amazon['amazon_search_opportunities_holdout_log_rmse']:.4f};
+    90% coverage: {amazon['amazon_search_opportunities_holdout_coverage_90']:.1%}.
+- Amazon paid-click holdout log RMSE: {amazon['amazon_paid_clicks_holdout_log_rmse']:.4f};
+    90% coverage: {amazon['amazon_paid_clicks_holdout_coverage_90']:.1%}.
+- CPC spend reconciliation error: ${amazon['cpc_spend_reconciliation_error']:.8f}.
+- Amazon mediator gate: {amazon['pass']}.
+
+Amazon Search and Display are separate channels from generic Display and Paid Search. Marketplace
+search intent, sponsored placement rules, click capture, and platform attribution are not assumed to
+match Google or other networks. This extension has a matched synthetic generator/model by design; its
+recovery gates do not establish real-world incrementality.
+"""
     if getattr(args, "hierarchical_media", False):
         text += f"""
 ## Hierarchical Media Shrinkage
@@ -1392,7 +1675,7 @@ See product_media_recovery.csv and media_hierarchy_scales.csv for estimates and 
 Brand equity is a measured 0-100 score and a persistent latent logit state, not a separate
 outcome disconnected from sales. Each product has one weekly score measurement shared across
 its tiers. A logistic-normal measurement likelihood is jointly fitted with sales and mediators.
-The state blends its prior state with a target driven by the five media response features,
+The state blends its prior state with a target driven by {5 + (2 if args.amazon else 0)} media response features,
 current sponsorship impressions, and distribution coverage. Measurement noise is estimated;
 there are no unobserved process innovations in this first deterministic-state version.
 
@@ -1458,6 +1741,7 @@ def main():
     parser.add_argument("--funnel", action="store_true")
     parser.add_argument("--hierarchical-media", action="store_true")
     parser.add_argument("--brand-state", action="store_true")
+    parser.add_argument("--amazon", action="store_true")
     parser.add_argument("--seed", type=int, default=20261007)
     parser.add_argument("--weeks", type=int, default=156)
     parser.add_argument("--holdout-weeks", type=int, default=26)
@@ -1479,6 +1763,8 @@ def main():
         default_folder += "_hierarchical"
     if args.brand_state:
         default_folder += "_brand_state"
+    if args.amazon:
+        default_folder += "_amazon"
     output = (args.output or (ROOT / default_folder)).resolve()
     if args.funnel and args.stockouts:
         protected = {"outputs", "outputs_stockouts", "outputs_funnel"}
@@ -1488,6 +1774,13 @@ def main():
         protected.update({"outputs", "outputs_stockouts", "outputs_funnel", "outputs_combined"})
     if args.brand_state:
         protected.update({"outputs", "outputs_stockouts", "outputs_funnel", "outputs_combined", "outputs_combined_hierarchical", "outputs_brand_equity"})
+    if args.amazon:
+        protected.update({
+            "outputs", "outputs_stockouts", "outputs_funnel", "outputs_combined",
+            "outputs_combined_hierarchical", "outputs_combined_hierarchical_brand_state",
+            "outputs_kalman_profit_validated", "outputs_brand_equity",
+            "outputs_brand_state_validated",
+        })
     if output in {(ROOT / name).resolve() for name in protected}:
         parser.error("Extension runs must not overwrite the preserved reference output folders.")
     output.mkdir(parents=True, exist_ok=True)
@@ -1495,6 +1788,7 @@ def main():
         args.weeks, args.seed, stockouts=args.stockouts, funnel=args.funnel,
         hierarchical_media=args.hierarchical_media,
         brand_state=args.brand_state,
+        amazon=args.amazon,
     )
     save_data(frame, truth, output)
     if args.generate_only:
@@ -1504,7 +1798,7 @@ def main():
     data = prepare_data(frame)
     data["hierarchical_media"] = args.hierarchical_media
     model = build_model(data, train_weeks)
-    print(f"Fit {train_weeks} weeks; preserve {args.holdout_weeks} holdout weeks. Stockouts={args.stockouts}; funnel={args.funnel}; hierarchical_media={args.hierarchical_media}; brand_state={args.brand_state}.")
+    print(f"Fit {train_weeks} weeks; preserve {args.holdout_weeks} holdout weeks. Stockouts={args.stockouts}; funnel={args.funnel}; hierarchical_media={args.hierarchical_media}; brand_state={args.brand_state}; amazon={args.amazon}.")
     with model:
         idata = pm.sample(
             draws=args.draws, tune=args.tune, chains=args.chains, cores=args.chains,
@@ -1521,6 +1815,10 @@ def main():
     results = {"sampling": sampling, "forecast": forecast, "recovery": recovery}
     if args.funnel:
         results["funnel"] = funnel_outputs(select_samples(samples), data, truth, train_weeks, output, args.seed + 3)
+    if args.amazon:
+        results["amazon"] = amazon_search_outputs(
+            select_samples(samples), data, truth, train_weeks, output, args.seed + 5
+        )
     if args.brand_state:
         results["brand_state"] = brand_state_outputs(select_samples(samples), data, truth, train_weeks, output, args.seed + 4)
     if sampling["pass"]:
@@ -1538,6 +1836,9 @@ def main():
         "target_accept": args.target_accept,
         "likelihood": "censored log-Normal" if args.stockouts else "uncensored log-Normal",
         "stockouts": args.stockouts, "funnel": args.funnel,
+        "amazon": args.amazon,
+        "channels": data["channels"],
+        "channel_unit_costs": data["unit_cost"].tolist(),
         "hierarchical_media": args.hierarchical_media,
         "brand_state": args.brand_state,
         "brand_state_model": (

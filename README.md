@@ -51,7 +51,8 @@ forecast validation. This initial specification uses a seasonal baseline, not a
 latent random walk. All synthetic effects are specified before fitting.
 
 - Display, Video, Social, and CTV have their own estimated geometric adstock decay.
-- Paid-search clicks have no carryover and no branded-search intermediary.
+- Paid-search clicks have no carryover. In the funnel variant, spend-dependent clicks are modeled as
+  a capture of branded-search opportunities; sales use expected clicks rather than observed future clicks.
 - Every channel has estimated diminishing-return saturation. Social uses a fixed
   Hill power of 2 for an S-shaped curve; the others use power 1.
 - Adstock uses the current week plus 12 prior weeks, with normalized lag weights
@@ -65,6 +66,39 @@ latent random walk. All synthetic effects are specified before fitting.
 - Log sales have Normal noise, so sales have a log-Normal predictive distribution.
   Rounded synthetic unit counts are modeled as continuous log sales.
 - There are no stockouts, funnel mediation, or stochastic cost/reach likelihoods.
+
+## Optional Amazon Channels
+
+The opt-in `--amazon` extension adds distinct `amazon_display` and `amazon_search` channels; the
+five-channel reference remains the default and its saved outputs are preserved. Amazon Display is
+synthetic impression exposure priced at $14 CPM. Amazon Search generates on-Amazon query
+opportunities from independent organic demand and controls; spend-dependent click capture generates
+paid clicks, which are the sales feature. Its illustrative CPC is $2, and realized synthetic spend
+is exactly paid clicks times CPC, so zero clicks produce zero click charges. Query and click
+likelihoods use training product-weeks only; held-out mediators are prediction targets, not model
+inputs. Clicks are not individually linked to purchases, and this matched synthetic demonstration
+does not establish Amazon incrementality or platform billing behavior. Optimized Search budgets are
+spend caps/activity inputs; expected paid-click charges are scenario-dependent and can be below the
+allocated cap. Profit allocation exports planned budget and expected CPC charges separately.
+
+Generate the Amazon panel without fitting:
+
+```powershell
+& '.\.venv\Scripts\python.exe' '.\run_mmm.py' --amazon --generate-only --output '.\outputs_amazon_data'
+```
+
+Run the combined Amazon, funnel, stockout, hierarchical-media, and brand-state specification into
+a new folder:
+
+```powershell
+& '.\.venv\Scripts\python.exe' -u '.\run_mmm.py' --amazon --funnel --stockouts --hierarchical-media --brand-state --target-accept 0.99 --output '.\outputs_amazon_full'
+```
+
+This full MCMC fit has not been run or validated. Do not treat its budget outputs as recommendations
+until the saved fit passes the diagnostics and recovery gates. The existing
+[MMM_Implementation_Blueprint.pdf](MMM_Implementation_Blueprint.pdf) and validated result folders
+still describe the pre-Amazon reference. After a passing Amazon fit, build a separate blueprint from
+its saved metrics/config so the historical reference remains intact.
 
 Channel activity is independently scheduled across broad low, medium, high, and
 off periods. It is deliberately informative, rather than representative of every

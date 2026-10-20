@@ -193,6 +193,11 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
     config = json.loads((results_dir / "run_config.json").read_text())
     hierarchical = config.get("hierarchical_media", False)
     brand_state = config.get("brand_state", False)
+    amazon = config.get("amazon", False)
+    channels = config.get("channels", ["display", "video", "social", "ctv", "paid_search"])
+    reference_output = "outputs_amazon_full" if amazon else "outputs_kalman_profit_validated"
+    amazon_display = ", and Amazon Display" if amazon else ""
+    amazon_search = " and Amazon Search" if amazon else ""
     variants = ["outputs", "outputs_stockouts", "outputs_funnel", "outputs_combined"]
     if not all(json.loads((ROOT / folder / "metrics.json").read_text())["overall_pass"] for folder in variants):
         raise ValueError("This verified-run summary requires passing saved reference variants.")
@@ -247,15 +252,15 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
     right_x = margin + left_width + gap
     left_y = heading(pdf, "MODEL: WHAT IT REPRESENTS", left_x, y, left_width)
     media_text = (
-        "<b>Media response and shrinkage.</b> Display, Video, Social, and CTV have estimated "
-        "adstock (13 lag positions) and saturation; paid clicks have saturation only. Social's "
-        "Hill power is 2; the others use 1. Product responses partially pool toward learned "
-        "channel centers, with estimated deviation scales. Tier media slopes, decay, and "
-        "half-saturation remain shared. Comparative benefits versus no pooling are untested."
+        f"<b>Media response and shrinkage.</b> Display, Video, Social, and CTV{amazon_display} have "
+        f"estimated adstock (13 lag positions) and saturation; paid clicks{amazon_search} have "
+        "saturation only. Social's Hill power is 2; the others use 1. Product responses partially "
+        "pool toward learned channel centers, with estimated deviation scales. Tier media slopes, "
+        "decay, and half-saturation remain shared. Comparative benefits versus no pooling are untested."
         if hierarchical else
-        "<b>Media response.</b> Display, Video, Social, and CTV each have estimated geometric carryover "
+        f"<b>Media response.</b> Display, Video, Social, and CTV{amazon_display} have geometric carryover "
         "(current week + 12 lags), saturation, and nonnegative log-sales coefficients. Social has "
-        "an S-shaped Hill curve; the others have diminishing-return Hill curves. Paid clicks have "
+        f"an S-shaped Hill curve; the others have diminishing-return Hill curves. Paid clicks{amazon_search} have "
         "saturation but no adstock. Response coefficients are shared across products/tiers."
     )
     if brand_state:
@@ -264,33 +269,37 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
             "pool. Controls: price, macro, base-price growth, promotion, post-promotion dip, PrimeDays, "
             "and annual seasonality. No random-walk baseline.",
             "<b>Media shrinkage.</b> Positive product responses partially pool toward learned channel "
-            "centers. Display, Video, Social, and CTV have estimated adstock and saturation; paid "
-            "clicks have no adstock. Social is S-shaped. Tier slopes and transforms remain shared; "
+            f"centers. Display, Video, Social, and CTV{amazon_display} have adstock and saturation; "
+            f"paid clicks{amazon_search} have no adstock. Social is S-shaped. Tier slopes and transforms remain shared; "
             "no-pooling superiority is untested.",
             "<b>Funnel.</b> CTV, organic demand, and controls drive branded search. Search has "
             "log-Normal measurement noise; clicks are Binomial with spend-dependent capture. "
-            "Sales use latent mean clicks, not observed holdout outcomes; CTV also has a direct effect.",
+            f"{('Amazon Search has its own on-platform query/click mediator; Amazon Display is an impression channel. ' if amazon else '')}"
+            "Sales use expected clicks, not observed holdout clicks.",
             "<b>Kalman brand state.</b> A jointly estimated 0-100 score follows a linear-Gaussian "
             "logit state process with shocks and noisy score measurements. A Kalman filter updates "
             "states from training scores; nonlinear sales are not Kalman observations.",
             "<b>New business inputs.</b> Sponsorship has impressions and separate spend at a synthetic "
             "$18 CPM. Weekly product distribution is the volume-weighted % of available stores/market "
             "carrying the product, not store count. It is fixed in planning; no separate SKU-breadth variable.",
-            "<b>Sales and decisions.</b> Censored log-Normal sales = min(demand, inventory). Six spend "
+            f"<b>Sales and decisions.</b> Censored log-Normal sales = min(demand, inventory). {len(channels) + 1} spend "
             "lines include sponsorship. Compare units, expected contribution-profit, and 50/50 "
             "expected/5%-CVaR objectives over 13 weeks. Margin rates are illustrative, not observed "
             "costs; budget and product proportions are fixed. CTV attribution avoids double counting.",
         ]
+        if amazon:
+            blocks.insert(4, "<b>Amazon billing assumptions.</b> Amazon Display uses a synthetic $14 CPM; "
+                          "Amazon Search uses a synthetic $2 CPC, with zero click charges when there are no clicks.")
     else:
         blocks = [
         "<b>Demand and hierarchy.</b> Latent log sales combine global, product, tier, and product x tier "
         "intercepts with partial pooling. Controls cover price, macro demand, base-price growth, "
         "promotion, post-promotion dip, PrimeDays, and annual seasonality. No random-walk baseline.",
         media_text,
-        "<b>Funnel mediation.</b> CTV plus observed organic demand and controls drive latent branded "
+            "<b>Funnel mediation.</b> CTV plus observed organic demand and controls drive latent branded "
         "search. Search has log-Normal measurement noise; clicks are Binomial conditional on searches, "
-        "with spend-dependent capture. Sales use latent mean clicks, not held-out mediator outcomes. "
-        "CTV also has a direct sales effect.",
+            "with spend-dependent capture. Sales use latent mean clicks, not held-out mediator outcomes. "
+            f"CTV also has a direct sales effect.{(' Amazon Search has a separate on-platform query/click path.' if amazon else '')}",
         "<b>Inventory and sales.</b> Observed sales = min(demand, supplied inventory). A censored "
         "log-Normal likelihood learns demand behind capped sales. Forecasts distinguish latent demand "
         "from fulfillment; scenario evaluation uses E[min(demand, cap)], not a clipped mean.",
@@ -312,15 +321,24 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
         "below 0.0001%" if optimization["truth_relative_regret"] < 0.000001
         else f"{optimization['truth_relative_regret']:.4%}"
     )
+    mediator_evidence = (
+        f"Search {funnel['search_holdout_coverage_90']:.1%}; clicks {funnel['clicks_holdout_coverage_90']:.1%}"
+    )
+    if amazon:
+        amazon_metrics = metrics["amazon"]
+        mediator_evidence += (
+            f"; Amazon queries {amazon_metrics['amazon_search_opportunities_holdout_coverage_90']:.1%}; "
+            f"clicks {amazon_metrics['amazon_paid_clicks_holdout_coverage_90']:.1%}"
+        )
     evidence = [
         ("Sampling reliability", f"R-hat {sampling['max_rhat']:.4f}; {sampling['divergences']} divergences"),
         ("Holdout log-sales error", f"{forecast['rmse_improvement']:.1%} lower RMSE*"),
         ("90% predictive coverage", f"Demand {forecast['latent_coverage_90']:.1%}; sales {forecast['coverage_90']:.1%}"),
-        ("90% mediator coverage", f"Search {funnel['search_holdout_coverage_90']:.1%}; clicks {funnel['clicks_holdout_coverage_90']:.1%}"),
+        ("90% mediator coverage", mediator_evidence),
         ("Known media-effect recovery", (
-            f"{recovery['product_media_truths_covered']}/20 product intervals; max error {recovery['max_product_media_relative_error']:.2%}"
+            f"{recovery['product_media_truths_covered']}/{recovery['product_media_total']} product intervals; max error {recovery['max_product_media_relative_error']:.2%}"
             if hierarchical else
-            f"{recovery['media_truths_covered']}/5 intervals cover truth; max error {recovery['max_media_relative_error']:.2%}"
+            f"{recovery['media_truths_covered']}/{recovery['media_total']} intervals cover truth; max error {recovery['max_media_relative_error']:.2%}"
         )),
         ("CTV mediated lift recovery", f"{funnel['ctv_mediated_log_lift_relative_error']:.1%} relative error"),
         ("13-week allocation scenario", f"${optimization['total_budget']/1_000_000:.2f}m budget; +{optimization['predicted_lift']:.2%} units"),
@@ -330,8 +348,7 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
         profit = optimization["profit_optimization"]
         evidence[3] = (
             "Funnel coverage / CTV",
-            f"Search {funnel['search_holdout_coverage_90']:.1%}; clicks {funnel['clicks_holdout_coverage_90']:.1%}; "
-            f"CTV lift error {funnel['ctv_mediated_log_lift_relative_error']:.1%}",
+            f"{mediator_evidence}; CTV lift error {funnel['ctv_mediated_log_lift_relative_error']:.1%}",
         )
         evidence.insert(5, (
             "Brand score holdout",
@@ -417,7 +434,7 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
     pdf.line(margin, 38, width - margin, 38)
     pdf.setFillColor(MUTED)
     pdf.setFont("Helvetica", 7.2)
-    command = "python run_mmm.py --funnel --stockouts" + (" --hierarchical-media" if hierarchical else "")
+    command = "python run_mmm.py --funnel --stockouts" + (" --hierarchical-media" if hierarchical else "") + (" --amazon" if amazon else "")
     if brand_state:
         pdf.drawString(margin, 25, f"Source: {results_dir.name} | Kalman state + synthetic profit | See README")
     else:
@@ -440,8 +457,8 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
                     "holdout. Brand scores, sponsorship, distribution, search, and clicks are product-week "
                     "quantities and must not be duplicated across the three price tiers.",
                     "The current generator carries sales, list price, discount, nominal/base price, macro and "
-                    "event controls; five media exposures/spend series and reference exposures; optional search "
-                    "and click mediators; inventory caps; product-week brand scores; sponsorship impressions/spend; "
+                    "event controls; configured media exposures/spend and reference exposures; optional Google "
+                    "and Amazon search/click mediators; inventory caps; product-week brand scores; sponsorship impressions/spend; "
                     "and volume-weighted product distribution. Preserve keys, units, currencies, time zones, "
                     "week-ending convention, and source lineage for every field.",
                 ]),
@@ -493,8 +510,9 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
                     "encode shrinkage toward group centers while allowing supported groups to differ.",
                 ]),
                 ("Media response and hierarchy", [
-                    "Display, Video, Social, and CTV use estimated geometric adstock over current week plus "
-                    "12 prior weeks, with normalized weights; paid-search clicks have no carryover. Hill "
+                    "Display, Video, Social, CTV, and optional Amazon Display use estimated geometric adstock "
+                    "over current week plus 12 prior weeks, with normalized weights; Google and optional "
+                    "Amazon paid-search clicks have no carryover. Hill "
                     "saturation uses power 2 for Social and power 1 otherwise. Media coefficients are "
                     "positive HalfNormal(0.8) log-sales effects. Carryover decays use Beta(2,2); "
                     "half-saturation uses LogNormal(0,0.6).",
@@ -507,8 +525,9 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
                 ("Search and click funnel", [
                     "CTV saturation, macro, seasonality, and an observed organic-demand index drive latent "
                     "branded-search intensity. Search observations are rounded log-Normal; paid clicks are "
-                    "Binomial conditional on searches with spend-dependent capture. Zero spend gives zero "
-                    "clicks. Sales use structural expected clicks, not noisy observed holdout mediators. "
+                    "Binomial conditional on searches with spend-dependent capture. Optional Amazon Search "
+                    "separately models on-platform query opportunities and paid clicks; zero activity gives "
+                    "zero clicks. Sales use structural expected clicks, not noisy observed holdout mediators. "
                     "CTV receives direct and induced-click lift; paid search receives its no-CTV click lift "
                     "under the chosen ordered attribution convention.",
                 ]),
@@ -550,12 +569,24 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
             "after diagnostics and decision checks pass.",
             [
                 ("Run and preserve the reference", [
-                    "Current end-to-end command: <font name='Courier'>python run_mmm.py --funnel --stockouts "
-                    "--hierarchical-media --brand-state --target-accept 0.99 --output outputs_kalman_profit_validated</font>. "
+                    f"Current end-to-end command: <font name='Courier'>python run_mmm.py --funnel --stockouts "
+                    f"--hierarchical-media --brand-state {'--amazon ' if amazon else ''}--target-accept 0.99 "
+                    f"--output {reference_output}</font>. "
                     "In this workspace, invoke it with <font name='Courier'>.venv/Scripts/python.exe</font>. "
                     "The reference uses seed 20261007, 156 weeks, 130 training weeks, 26 holdout weeks, "
                     "four NUTS chains, 1,500 tune steps, and 1,000 retained draws per chain. Use a new "
                     "output directory for each specification or seed.",
+                ]),
+                ("Amazon channel status", [
+                    (
+                        "This saved run includes the optional Amazon channels; see the mediator evidence and "
+                        "synthetic cost assumptions above. Results are still conditional on the matched "
+                        "generator and are not real-world platform validation."
+                        if amazon else
+                        "Source supports an opt-in Amazon extension: Amazon Display impressions at a synthetic "
+                        "$14 CPM and Amazon Search query/click mediation at a synthetic $2 CPC. This saved "
+                        "reference predates that extension; it contains no Amazon fit or recovery results."
+                    ),
                 ]),
                 ("Pipeline", [
                     "1. Generate/import and validate the panel. 2. Fit only training sales and training "
@@ -569,7 +600,7 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
                     "Sampling: max R-hat < 1.01, bulk ESS >= 400, tail ESS >= 200, zero divergences, "
                     "and tree depth below the configured cap. Forecast: beat the product-tier mean "
                     "benchmark and achieve 85%-97% nominal 90% coverage. Media recovery: at least four "
-                    "of five truths covered, maximum coefficient error <= 25%, decay error <= 0.10. "
+                    "channel truths covered, maximum coefficient error <= 25%, decay error <= 0.10. "
                     "Attribution error <= 25%; budget conserved; unit allocation within 2% of the best "
                     "known-truth solution found under the same constraints. These are lightweight "
                     "synthetic gates, not sufficient production acceptance criteria.",
@@ -602,9 +633,12 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
                 ("Current planning contract", [
                     "Plan 13 weeks with one constant share per channel, fixed product proportions, fixed total "
                     "weekly budget based on recent spend, and each share bounded to 40%-180% of baseline. "
-                    "Known CPM/CPC mappings convert spend to exposure; sponsorship is a sixth line in brand "
+                    "Known CPM/CPC mappings convert spend to exposure; sponsorship is an additional line in brand "
                     "mode. Historical adstock and filtered brand state carry into planning. Future prices, "
                     "controls, organic demand, distribution, and inventory are supplied scenarios.",
+                    "Amazon Search allocation is a spend-cap/activity input; expected click charges are "
+                    "posterior-predictive clicks times CPC, so unused caps may remain unspent. Planned budget "
+                    "and expected charged spend are reported separately.",
                     "The workflow reports three objectives: expected fulfilled units; expected net "
                     "contribution profit; and 50% expected profit + 50% lower-tail CVaR at 5% across "
                     "512 predictive scenarios. CVaR is the mean profit in the worst 5% of scenarios. "
@@ -617,7 +651,8 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
                     "product and Core/Premium/Value tier are: Entry-Level Desktops 18/20/16%; Gaming PCs "
                     "22/28/19%; Premium Desktops 25/30/22%; Premium Laptops 20/26/18%. Media reference "
                     "costs are Display/Video/Social/CTV CPM $4/$12/$9/$22, paid-search CPC $1.50, and "
-                    "sponsorship CPM $18.",
+                    "sponsorship CPM $18. The opt-in Amazon scenario uses Amazon Display CPM $14 and "
+                    "Amazon Search CPC $2; realized synthetic click spend is clicks times CPC.",
                     "These are not observed unit costs. Add verified variable COGS, rebates, fulfillment, "
                     "returns, taxes, and any contribution definitions approved by Finance. Model uncertainty "
                     "in price, margin, media costs, supply, and forecast inputs where decision material. "

@@ -7,11 +7,14 @@ from scipy.special import ndtr, ndtri, expit
 
 
 CHANNELS = ["display", "video", "social", "ctv", "paid_search"]
+AMAZON_CHANNELS = ["amazon_display", "amazon_search"]
 PRODUCTS = ["Entry-Level Desktops", "Gaming PCs", "Premium Desktops", "Premium Laptops"]
 TIERS = ["Core", "Premium", "Value"]
 REFERENCE_EXPOSURE = np.array([1_000_000, 1_200_000, 1_000_000, 700_000, 8_000.0])
+AMAZON_REFERENCE_EXPOSURE = np.array([900_000.0, 12_000.0])
 PRODUCT_FACTORS = np.array([0.8, 1.2, 1.0, 1.1])
 UNIT_COST = np.array([4 / 1000, 12 / 1000, 9 / 1000, 22 / 1000, 1.5])
+AMAZON_UNIT_COST = np.array([14 / 1000, 2.0])
 CONTRIBUTION_MARGIN_RATE = np.array([
     [0.18, 0.20, 0.16],
     [0.22, 0.28, 0.19],
@@ -38,12 +41,31 @@ def lagged_exposures(exposures):
 
 
 def media_features(exposures, decay, half_saturation):
+    channel_count = exposures.shape[-1]
     lagged, valid = lagged_exposures(exposures)
     weights = np.asarray(decay)[None, :] ** np.arange(MAX_LAG)[:, None]
     denominator = np.einsum("tl,lc->tc", valid, weights)
     adstock = np.einsum("ptlc,lc->ptc", lagged, weights) / denominator[None, :, :]
-    powered = adstock ** HILL_POWER
-    return powered / (powered + np.asarray(half_saturation) ** HILL_POWER)
+    hill_power = hill_power_for_channels(channel_count)
+    powered = adstock ** hill_power
+    return powered / (powered + np.asarray(half_saturation) ** hill_power)
+
+
+def channel_costs(channels):
+    costs = dict(zip(CHANNELS, UNIT_COST))
+    costs.update(zip(AMAZON_CHANNELS, AMAZON_UNIT_COST))
+    return np.array([costs[name] for name in channels])
+
+
+def channel_reference(channels):
+    references = dict(zip(CHANNELS, REFERENCE_EXPOSURE))
+    references.update(zip(AMAZON_CHANNELS, AMAZON_REFERENCE_EXPOSURE))
+    return np.array([references[name] for name in channels])
+
+
+def hill_power_for_channels(channel_count):
+    extended = np.concatenate([HILL_POWER, np.ones(len(AMAZON_CHANNELS))])
+    return extended[:channel_count]
 
 
 def activity_schedule(rng, week_count):
@@ -203,6 +225,84 @@ def add_funnel(frame, truth, seed):
     return frame, truth
 
 
+def add_amazon_search(frame, truth, seed):
+    frame = frame.copy()
+    truth = dict(truth)
+    data = prepare_data(frame)
+    rng = np.random.default_rng(seed + 1300)
+    week_count = len(data["weeks"])
+    organic_log = rng.normal(0, 0.4, (len(PRODUCTS), week_count))
+    macro = np.log(frame.groupby("week").macro_index.first().reindex(data["weeks"]).to_numpy())
+    angle = 2 * np.pi * data["weeks"].isocalendar().week.to_numpy(dtype=float) / 52
+    controls = np.stack([
+        np.broadcast_to(macro, organic_log.shape),
+        np.broadcast_to(np.sin(angle), organic_log.shape),
+        np.broadcast_to(np.cos(angle), organic_log.shape), organic_log,
+    ], axis=-1)
+    search_reference = 100_000 * PRODUCT_FACTORS
+    search_intercept = np.log(search_reference)
+    search_control_beta = np.array([0.35, 0.08, -0.06, 0.65])
+    search_sigma = 0.09
+    click_max_rate = 0.22
+    click_budget_half = 0.65
+    amazon_search_index = data["channels"].index("amazon_search")
+    amazon_display_index = data["channels"].index("amazon_display")
+    beta = np.asarray(truth["media_beta"])[amazon_search_index]
+    half = truth["half_saturation"][amazon_search_index]
+    log_search = (
+        search_intercept[:, None]
+        + np.einsum("ptk,k->pt", controls, search_control_beta)
+    )
+    search_counts = np.maximum(1, np.rint(
+        np.exp(rng.normal(log_search, search_sigma))
+    )).astype(np.int64)
+    budget_ratio = data["ratio"][:, :, amazon_search_index]
+    planned_budget = budget_ratio * data["reference"][:, amazon_search_index:amazon_search_index + 1] * AMAZON_UNIT_COST[1]
+    probability = funnel_click_probability(budget_ratio, click_max_rate, click_budget_half)
+    clicks = rng.binomial(search_counts, probability)
+    expected_clicks = np.exp(log_search) * probability
+    click_ratio = expected_clicks / data["reference"][:, amazon_search_index:amazon_search_index + 1]
+    feature = click_ratio / (click_ratio + half)
+    product, week = data["product"], data["week"]
+    effect = beta * feature[product, week]
+    original_mean = frame.truth_log_sales_mean.to_numpy()
+    noise = np.log(frame.units.to_numpy(float)) - original_mean
+    updated_mean = original_mean - frame.truth_amazon_search_log_effect.to_numpy() + effect
+    frame["units"] = np.maximum(1, np.rint(np.exp(updated_mean + noise))).astype(np.int64)
+    frame["truth_log_sales_mean"] = updated_mean
+    frame["truth_expected_units"] = np.exp(updated_mean + truth["sigma"]**2 / 2)
+    frame["truth_amazon_search_log_effect"] = effect
+    frame["amazon_search_exposure"] = clicks[product, week]
+    frame["amazon_search_budget_activity"] = planned_budget[product, week]
+    frame["amazon_search_spend"] = clicks[product, week] * AMAZON_UNIT_COST[1]
+    frame["amazon_search_volume"] = search_counts[product, week]
+    frame["amazon_organic_demand_index"] = np.exp(organic_log[product, week])
+    frame["amazon_search_reference"] = search_reference[product]
+    frame["truth_amazon_search_click_mean"] = expected_clicks[product, week]
+    frame["truth_amazon_search_log_mean"] = log_search[product, week]
+    frame["truth_amazon_search_click_probability"] = probability[product, week]
+    truth.update({
+        "amazon_search_intercept": search_intercept.tolist(),
+        "amazon_search_control_beta": search_control_beta.tolist(),
+        "amazon_search_sigma": search_sigma,
+        "amazon_click_max_rate": click_max_rate,
+        "amazon_click_budget_half": click_budget_half,
+        "amazon_search_design": {
+            "seed": seed + 1300,
+            "search_family": "rounded log-Normal query opportunities",
+            "click_family": "Binomial conditional on on-Amazon query opportunities and synthetic CPC budget activity",
+            "billing": "synthetic CPC; realized spend equals valid paid clicks times nominal CPC",
+            "budget_activity": "planned spend-equivalent activity index controls click capture",
+            "sales_driver": "latent query intensity times spend-dependent click capture",
+            "organic_index": "independent exogenous product-query demand driver",
+        },
+    })
+    truth["channels"] = data["channels"]
+    truth["unit_cost"] = channel_costs(data["channels"]).tolist()
+    truth["reference_exposure"] = data["reference"].tolist()
+    return frame, truth
+
+
 def persistent_brand_state(target, persistence, initial, innovations=None):
     target = np.asarray(target)
     persistence = np.asarray(persistence)
@@ -281,11 +381,28 @@ def add_brand_state(frame, truth, seed):
         capture = funnel_click_probability(data["paid_budget_ratio"], truth["click_max_rate"], truth["click_budget_half"])
         clicks = np.exp(log_search) * capture / data["reference"][:, 4:5]
         features[:, :, 4] = clicks / (clicks + truth["half_saturation"][4])
+    if data["amazon"]:
+        amazon_search_index = data["channels"].index("amazon_search")
+        log_search = (
+            np.asarray(truth["amazon_search_intercept"])[:, None]
+            + np.einsum(
+                "ptk,k->pt", data["amazon_search_controls"],
+                np.asarray(truth["amazon_search_control_beta"]),
+            )
+        )
+        capture = funnel_click_probability(
+            data["amazon_budget_ratio"], truth["amazon_click_max_rate"],
+            truth["amazon_click_budget_half"],
+        )
+        clicks = np.exp(log_search) * capture / data["reference"][:, amazon_search_index:amazon_search_index + 1]
+        features[:, :, amazon_search_index] = clicks / (
+            clicks + truth["half_saturation"][amazon_search_index]
+        )
     truth.update({
         "brand_intercept": -0.35,
         "brand_product_effect": [-0.20, 0.10, -0.05, 0.15],
         "brand_initial": [-0.20, 0.10, -0.05, 0.15],
-        "brand_media_beta": [0.35, 0.50, 0.60, 0.45, 0.30],
+        "brand_media_beta": [0.35, 0.50, 0.60, 0.45, 0.30] + ([0.38, 0.28] if data["amazon"] else []),
         "brand_sponsorship_beta": 0.45,
         "brand_distribution_beta": 0.90,
         "brand_persistence": 0.90,
@@ -336,18 +453,23 @@ def add_brand_state(frame, truth, seed):
     return frame, truth
 
 
-def generate_data(weeks=156, seed=20261007, stockouts=False, funnel=False, hierarchical_media=False, brand_state=False):
+def generate_data(weeks=156, seed=20261007, stockouts=False, funnel=False, hierarchical_media=False,
+                  brand_state=False, amazon=False):
     if weeks < 104:
         raise ValueError("The reference example requires at least 104 weeks.")
     rng = np.random.default_rng(seed)
     dates = pd.date_range(end="2026-10-04", periods=weeks, freq="W-SUN")
-    exposure_ratio = np.empty((len(PRODUCTS), weeks, len(CHANNELS)))
+    channels = CHANNELS + (AMAZON_CHANNELS if amazon else [])
+    channel_reference_values = channel_reference(channels)
+    channel_cost_values = channel_costs(channels)
+    hill_power = hill_power_for_channels(len(channels))
+    exposure_ratio = np.empty((len(PRODUCTS), weeks, len(channels)))
     for product in range(len(PRODUCTS)):
-        for channel in range(len(CHANNELS)):
+        for channel in range(len(channels)):
             exposure_ratio[product, :, channel] = activity_schedule(rng, weeks)
-    reference = PRODUCT_FACTORS[:, None] * REFERENCE_EXPOSURE[None, :]
+    reference = PRODUCT_FACTORS[:, None] * channel_reference_values[None, :]
     exposures = exposure_ratio * reference[:, None, :]
-    spend = exposures * UNIT_COST
+    spend = exposures * channel_cost_values
     macro_log = np.zeros(weeks)
     for week in range(1, weeks):
         macro_log[week] = 0.45 * macro_log[week - 1] + rng.normal(0, 0.065)
@@ -375,17 +497,17 @@ def generate_data(weeks=156, seed=20261007, stockouts=False, funnel=False, hiera
         "product_effect": [-0.30, 0.10, -0.15, 0.35],
         "tier_effect": [0.0, -0.45, 0.45],
         "interaction": interactions.tolist(),
-        "media_beta": [0.45, 0.65, 0.75, 0.60, 0.45],
-        "decay": [0.25, 0.45, 0.55, 0.65, 0.0],
-        "half_saturation": [0.80, 1.00, 0.70, 1.15, 0.90],
+        "media_beta": [0.45, 0.65, 0.75, 0.60, 0.45] + ([0.40, 0.35] if amazon else []),
+        "decay": [0.25, 0.45, 0.55, 0.65, 0.0] + ([0.35, 0.0] if amazon else []),
+        "half_saturation": [0.80, 1.00, 0.70, 1.15, 0.90] + ([0.95, 0.80] if amazon else []),
         "control_beta": [-1.2, 0.9, -0.85, 0.16, -0.08, float(np.log(1.22)), 0.15, -0.08],
         "sigma": 0.06,
         "seed": seed,
         "weeks": weeks,
-        "channels": CHANNELS,
+        "channels": channels,
         "max_lag_weeks": MAX_LAG,
-        "hill_power": HILL_POWER.tolist(),
-        "unit_cost": UNIT_COST.tolist(),
+        "hill_power": hill_power.tolist(),
+        "unit_cost": channel_cost_values.tolist(),
         "contribution_margin_rate_by_product_tier": CONTRIBUTION_MARGIN_RATE.tolist(),
         "profit_assumption": "list price after discount times assumed product-tier contribution margin; excludes tax, returns, fulfillment, and fixed costs",
         "reference_exposure": reference.tolist(),
@@ -393,11 +515,13 @@ def generate_data(weeks=156, seed=20261007, stockouts=False, funnel=False, hiera
     product_media_beta = np.tile(truth["media_beta"], (len(PRODUCTS), 1))
     if hierarchical_media:
         log_deviations = np.array([
-            [-0.28, 0.20, -0.15, 0.25, -0.22],
-            [0.20, -0.24, 0.30, -0.18, 0.12],
-            [-0.10, 0.12, -0.25, -0.10, 0.25],
-            [0.18, -0.08, 0.10, 0.03, -0.15],
+            [-0.28, 0.20, -0.15, 0.25, -0.22, -0.12, -0.10],
+            [0.20, -0.24, 0.30, -0.18, 0.12, 0.08, 0.12],
+            [-0.10, 0.12, -0.25, -0.10, 0.25, -0.04, 0.04],
+            [0.18, -0.08, 0.10, 0.03, -0.15, 0.08, -0.06],
         ])
+        log_deviations = log_deviations[:, :len(channels)]
+        log_deviations -= log_deviations.mean(axis=0, keepdims=True)
         product_media_beta *= np.exp(log_deviations)
         truth["product_media_beta"] = product_media_beta.tolist()
         truth["media_log_deviations"] = log_deviations.tolist()
@@ -432,7 +556,7 @@ def generate_data(weeks=156, seed=20261007, stockouts=False, funnel=False, hiera
                     "truth_base_log_sales": base, "truth_log_sales_mean": eta,
                     "truth_expected_units": float(np.exp(eta + truth["sigma"]**2 / 2)),
                 }
-                for channel, name in enumerate(CHANNELS):
+                for channel, name in enumerate(channels):
                     row[f"{name}_exposure"] = exposures[product, week, channel]
                     row[f"{name}_spend"] = spend[product, week, channel]
                     row[f"{name}_reference"] = reference[product, channel]
@@ -442,6 +566,8 @@ def generate_data(weeks=156, seed=20261007, stockouts=False, funnel=False, hiera
     frame = pd.DataFrame(rows).sort_values(["week", "product", "tier"]).reset_index(drop=True)
     if funnel:
         frame, truth = add_funnel(frame, truth, seed)
+    if amazon:
+        frame, truth = add_amazon_search(frame, truth, seed)
     if brand_state:
         frame, truth = add_brand_state(frame, truth, seed)
     if stockouts:
@@ -468,13 +594,19 @@ def prepare_data(frame):
     product_week = frame.groupby(["product", "week"]).first().reindex(
         pd.MultiIndex.from_product([PRODUCTS, weeks], names=["product", "week"])
     )
+    channels = CHANNELS + (AMAZON_CHANNELS if "amazon_display_exposure" in frame else [])
+    carry_channels = [name for name in channels if name not in {"paid_search", "amazon_search"}]
+    cost_values = channel_costs(channels)
+    reference_values = channel_reference(channels)
     ratio = np.stack([
         (product_week[f"{name}_exposure"] / product_week[f"{name}_reference"]).to_numpy().reshape(len(PRODUCTS), len(weeks))
-        for name in CHANNELS
+        for name in channels
     ], axis=-1)
     result = {
         "frame": frame, "weeks": weeks, "product": product, "tier": tier,
-        "week": week, "controls": controls, "ratio": ratio,
+        "week": week, "controls": controls, "ratio": ratio, "channels": channels,
+        "carry_indices": np.array([channels.index(name) for name in carry_channels]),
+        "hill_power": hill_power_for_channels(len(channels)), "unit_cost": cost_values,
         "log_units": np.log(frame.units.to_numpy(float)),
         "net_unit_price": (frame.list_price * (1 - frame.discount)).to_numpy(float),
         "contribution_per_unit": (
@@ -484,10 +616,11 @@ def prepare_data(frame):
         "contribution_margin_rate": CONTRIBUTION_MARGIN_RATE.copy(),
         "inventory": frame["inventory_available"].to_numpy(float) if "inventory_available" in frame else None,
         "hierarchical_media": False,
-        "reference": PRODUCT_FACTORS[:, None] * REFERENCE_EXPOSURE[None, :],
+        "reference": PRODUCT_FACTORS[:, None] * reference_values[None, :],
     }
     result["funnel"] = "branded_search_volume" in frame
     result["brand_state"] = "brand_equity_score" in frame
+    result["amazon"] = "amazon_search_volume" in frame
     if result["brand_state"]:
         score = product_week.brand_equity_score.to_numpy().reshape(len(PRODUCTS), len(weeks))
         result.update({
@@ -501,7 +634,7 @@ def prepare_data(frame):
     if result["funnel"]:
         search_counts = product_week.branded_search_volume.to_numpy().reshape(len(PRODUCTS), len(weeks)).astype(np.int64)
         paid_spend = product_week.paid_search_spend.to_numpy().reshape(len(PRODUCTS), len(weeks))
-        budget_reference = result["reference"][:, 4:5] * UNIT_COST[4]
+        budget_reference = result["reference"][:, 4:5] * cost_values[4]
         organic_log = np.log(product_week.organic_demand_index.to_numpy().reshape(len(PRODUCTS), len(weeks)))
         macro = np.log(product_week.macro_index.to_numpy().reshape(len(PRODUCTS), len(weeks)))
         angle_week = 2 * np.pi * weeks.isocalendar().week.to_numpy(dtype=float) / 52
@@ -518,6 +651,25 @@ def prepare_data(frame):
         result["search_reference"] = (
             product_week.search_reference.to_numpy().reshape(len(PRODUCTS), len(weeks))[:, 0]
         )
+    if result["amazon"]:
+        amazon_search_index = channels.index("amazon_search")
+        amazon_spend = product_week.amazon_search_budget_activity.to_numpy().reshape(len(PRODUCTS), len(weeks))
+        amazon_budget_reference = result["reference"][:, amazon_search_index:amazon_search_index + 1] * cost_values[amazon_search_index]
+        organic_log = np.log(product_week.amazon_organic_demand_index.to_numpy().reshape(len(PRODUCTS), len(weeks)))
+        macro = np.log(product_week.macro_index.to_numpy().reshape(len(PRODUCTS), len(weeks)))
+        angle_week = 2 * np.pi * weeks.isocalendar().week.to_numpy(dtype=float) / 52
+        result.update({
+            "amazon_search_counts": product_week.amazon_search_volume.to_numpy().reshape(len(PRODUCTS), len(weeks)).astype(np.int64),
+            "amazon_click_counts": product_week.amazon_search_exposure.to_numpy().reshape(len(PRODUCTS), len(weeks)).astype(np.int64),
+            "amazon_search_spend": product_week.amazon_search_spend.to_numpy().reshape(len(PRODUCTS), len(weeks)),
+            "amazon_budget_ratio": amazon_spend / amazon_budget_reference,
+            "amazon_search_controls": np.stack([
+                macro, np.broadcast_to(np.sin(angle_week), macro.shape),
+                np.broadcast_to(np.cos(angle_week), macro.shape), organic_log,
+            ], axis=-1),
+            "amazon_search_reference": product_week.amazon_search_reference.to_numpy().reshape(len(PRODUCTS), len(weeks))[:, 0],
+        })
+        result["ratio"][:, :, amazon_search_index] = result["amazon_budget_ratio"]
     return result
 
 

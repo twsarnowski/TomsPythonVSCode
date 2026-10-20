@@ -12,6 +12,7 @@ from mmm_data import (
 from run_mmm import (
     build_model, extract_samples, predictions, planning_context,
     scenario_units, solve_allocation, truth_samples, brand_predictions, optimization_outputs,
+    scenario_amazon_search_spend,
 )
 from run_brand_equity import brand_features, generate_brand_panel, build_brand_model
 
@@ -123,6 +124,39 @@ class ReferenceWorkflowTests(unittest.TestCase):
             frame.truth_base_log_sales + frame[[f"truth_{name}_log_effect" for name in CHANNELS]].sum(axis=1),
             frame.truth_log_sales_mean, atol=1e-10,
         )
+
+    def test_amazon_channels_generator_model_and_cpc_billing(self):
+        frame, truth = generate_data(amazon=True)
+        data = prepare_data(frame)
+        self.assertEqual(data["channels"], CHANNELS + ["amazon_display", "amazon_search"])
+        np.testing.assert_allclose(
+            frame.amazon_display_spend,
+            frame.amazon_display_exposure * 14 / 1000,
+        )
+        np.testing.assert_allclose(frame.amazon_search_spend, frame.amazon_search_exposure * 2.0)
+        no_budget = frame.amazon_search_budget_activity == 0
+        self.assertTrue((frame.loc[no_budget, "amazon_search_exposure"] == 0).all())
+        self.assertTrue((frame.loc[no_budget, "amazon_search_spend"] == 0).all())
+        mu, _, _ = predictions(truth_samples(truth), data)
+        np.testing.assert_allclose(mu[0], frame.truth_log_sales_mean, atol=1e-10)
+
+        model = build_model(data, 130)
+        self.assertTrue(np.isfinite(model.compile_dlogp()(model.initial_point())).all())
+        altered = dict(data)
+        altered["amazon_search_counts"] = data["amazon_search_counts"].copy()
+        altered["amazon_search_counts"][:, 130:] += 99999
+        altered["amazon_click_counts"] = data["amazon_click_counts"].copy()
+        altered["amazon_click_counts"][:, 130:] += 999
+        changed = build_model(altered, 130)
+        np.testing.assert_allclose(
+            model.compile_logp()(model.initial_point()),
+            changed.compile_logp()(changed.initial_point()),
+        )
+        context = planning_context(truth_samples(truth), data, 130)
+        zero_plan = np.zeros(len(data["channels"]))
+        self.assertEqual(scenario_amazon_search_spend(context, zero_plan)[0], 0)
+        active_plan = data["ratio"][:, 104:130, :].mean(axis=(0, 1))
+        self.assertGreater(scenario_amazon_search_spend(context, active_plan)[0], 0)
 
     def test_funnel_graph_and_mediator_holdout_exclusion(self):
         frame, truth = generate_data(funnel=True)

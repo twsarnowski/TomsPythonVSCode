@@ -26,6 +26,12 @@ outputs_kalman_profit_validated is the current saved reference. The recorded fit
 
 Earlier output folders and PDFs remain historical references, including the deterministic-brand fit. Source has evolved since those fits: old commands need the matching historic commit to reproduce the old specification. Preserve Read MMM.py, SimpleAdd.py, and user edits.
 
+## Amazon Extension Status (2026-10-19)
+
+Source now has an opt-in `--amazon` synthetic extension; the default five-channel generator/model and saved validated folders remain unchanged. Amazon Display is a separate impression channel at an illustrative $14 CPM. Amazon Search uses synthetic on-Amazon query opportunities and a spend-dependent Binomial click mediator; realized synthetic spend is paid clicks times an illustrative $2 CPC, so no clicks means no click charges. Planned Search budgets are caps/activity inputs; expected CPC charges vary with clicks and can leave budget unused. Amazon Search clicks are not individually linked to purchases. All 20 regression tests pass on the final source, including generator reconstruction, finite model gradients, holdout mediator exclusion, planning equivalence, and zero-click billing. No full Amazon MCMC fit or passing Amazon recovery run has been completed. The rebuilt six-page blueprint explicitly identifies the saved result as pre-Amazon.
+
+Generate the optional dataset with `--amazon --generate-only`; the intended full extension run is documented in README.md and must use a new output folder. Once the run passes all gates, generate a separate PDF from its saved results. Do not replace the historical validated outputs or claim Amazon recovery until that fit is complete. Do not commit or push without user confirmation.
+
 ## Commands
 
 From the workspace in PowerShell:
