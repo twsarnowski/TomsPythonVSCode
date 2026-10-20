@@ -140,6 +140,20 @@ class ReferenceWorkflowTests(unittest.TestCase):
         mu, _, _ = predictions(truth_samples(truth), data)
         np.testing.assert_allclose(mu[0], frame.truth_log_sales_mean, atol=1e-10)
 
+        combined_frame, combined_truth = generate_data(
+            amazon=True, funnel=True, hierarchical_media=True
+        )
+        combined_data = prepare_data(combined_frame)
+        combined_data["hierarchical_media"] = True
+        combined_mu, _, _ = predictions(truth_samples(combined_truth), combined_data)
+        np.testing.assert_allclose(
+            combined_mu[0], combined_frame.truth_log_sales_mean, atol=1e-10
+        )
+        combined_model = build_model(combined_data, 130)
+        self.assertTrue(np.isfinite(
+            combined_model.compile_dlogp()(combined_model.initial_point())
+        ).all())
+
         model = build_model(data, 130)
         self.assertTrue(np.isfinite(model.compile_dlogp()(model.initial_point())).all())
         altered = dict(data)

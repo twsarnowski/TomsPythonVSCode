@@ -247,7 +247,10 @@ def add_amazon_search(frame, truth, seed):
     click_budget_half = 0.65
     amazon_search_index = data["channels"].index("amazon_search")
     amazon_display_index = data["channels"].index("amazon_display")
-    beta = np.asarray(truth["media_beta"])[amazon_search_index]
+    beta = np.asarray(truth.get(
+        "product_media_beta",
+        np.tile(truth["media_beta"], (len(PRODUCTS), 1)),
+    ))[:, amazon_search_index]
     half = truth["half_saturation"][amazon_search_index]
     log_search = (
         search_intercept[:, None]
@@ -264,7 +267,7 @@ def add_amazon_search(frame, truth, seed):
     click_ratio = expected_clicks / data["reference"][:, amazon_search_index:amazon_search_index + 1]
     feature = click_ratio / (click_ratio + half)
     product, week = data["product"], data["week"]
-    effect = beta * feature[product, week]
+    effect = beta[product] * feature[product, week]
     original_mean = frame.truth_log_sales_mean.to_numpy()
     noise = np.log(frame.units.to_numpy(float)) - original_mean
     updated_mean = original_mean - frame.truth_amazon_search_log_effect.to_numpy() + effect

@@ -94,11 +94,34 @@ a new folder:
 & '.\.venv\Scripts\python.exe' -u '.\run_mmm.py' --amazon --funnel --stockouts --hierarchical-media --brand-state --target-accept 0.99 --output '.\outputs_amazon_full'
 ```
 
-This full MCMC fit has not been run or validated. Do not treat its budget outputs as recommendations
-until the saved fit passes the diagnostics and recovery gates. The existing
-[MMM_Implementation_Blueprint.pdf](MMM_Implementation_Blueprint.pdf) and validated result folders
-still describe the pre-Amazon reference. After a passing Amazon fit, build a separate blueprint from
-its saved metrics/config so the historical reference remains intact.
+## Completed Amazon Reference Run
+
+The full specification completed in `outputs_amazon_full` on branch `amazon-full-workflow` using
+seed 20261007, 156 weeks, 130 training weeks, 26 holdout weeks, four chains, 1,500 tuning steps,
+1,000 draws per chain, and target acceptance 0.99. The complete output folder, including posterior
+draws, generated data/truth, metrics, diagnostics, forecasts, attribution, optimizer tables, and
+plots, is committed with the source. The original five-channel run and its outputs remain available
+on `update-simple-math`; this branch adds the Amazon terms and preserves both workflows.
+
+All recorded gates passed: zero divergences, maximum R-hat 1.0048, minimum bulk/tail ESS 1468/1538;
+sales holdout coverage 92.9% and RMSE improvement 89.7%; all 7 media truths and 28/28 product media
+truths covered by their 90% intervals; Amazon Search opportunity/click coverage 91.3%/93.3%; exact
+CPC spend reconciliation; brand holdout coverage 88.5%; and unit/profit/CVaR budget gates passed.
+The fitted unit allocation predicts +1.87% units. Synthetic expected contribution is about $1.860B
+at baseline and $1.891B optimized; these values rely on illustrative margins and are not business
+forecasts or real-world causal validation.
+
+The new [MMM_Implementation_Blueprint_Amazon.pdf](MMM_Implementation_Blueprint_Amazon.pdf) and
+`outputs_amazon_full/run_report.md` document this run. The older
+[MMM_Implementation_Blueprint.pdf](MMM_Implementation_Blueprint.pdf) remains the pre-Amazon
+reference. Rebuild the Amazon blueprint without fitting again:
+
+```powershell
+& '.\.venv\Scripts\python.exe' '.\build_summary_pdf.py' --results-dir '.\outputs_amazon_full' --output '.\MMM_Implementation_Blueprint_Amazon.pdf'
+```
+
+Resume by reviewing `CHECKPOINT.md`, the Amazon blueprint, and the saved config/metrics/report.
+The full fit took about 68 minutes; a fresh MCMC run is not required to inspect the committed results.
 
 Channel activity is independently scheduled across broad low, medium, high, and
 off periods. It is deliberately informative, rather than representative of every

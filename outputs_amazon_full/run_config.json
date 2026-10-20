@@ -1,0 +1,66 @@
+{
+  "seed": 20261007,
+  "weeks": 156,
+  "train_weeks": 130,
+  "holdout_weeks": 26,
+  "chains": 4,
+  "tune": 1500,
+  "draws": 1000,
+  "target_accept": 0.99,
+  "likelihood": "censored log-Normal",
+  "stockouts": true,
+  "funnel": true,
+  "amazon": true,
+  "channels": [
+    "display",
+    "video",
+    "social",
+    "ctv",
+    "paid_search",
+    "amazon_display",
+    "amazon_search"
+  ],
+  "channel_unit_costs": [
+    0.004,
+    0.012,
+    0.009,
+    0.022,
+    1.5,
+    0.014,
+    2.0
+  ],
+  "hierarchical_media": true,
+  "brand_state": true,
+  "brand_state_model": "linear-Gaussian Kalman filter on logit score observations; process noise included; sales depend on moment-adjusted latent state and are not filter measurements",
+  "brand_process_sigma_prior": "HalfNormal(0.05)",
+  "contribution_margin_rates_by_product_tier": [
+    [
+      0.18,
+      0.2,
+      0.16
+    ],
+    [
+      0.22,
+      0.28,
+      0.19
+    ],
+    [
+      0.25,
+      0.3,
+      0.22
+    ],
+    [
+      0.2,
+      0.26,
+      0.18
+    ]
+  ],
+  "profit_definition": "fulfilled units x net unit price x assumed contribution-margin rate - media/sponsorship spend",
+  "risk_adjustment": {
+    "objective": "equal-weight expected net profit and lower-tail CVaR",
+    "cvar_tail_probability": 0.05,
+    "cvar_weight": 0.5,
+    "predictive_scenarios": 512
+  },
+  "conditional_forecast": true
+}

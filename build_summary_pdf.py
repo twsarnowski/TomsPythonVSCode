@@ -198,6 +198,7 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
     reference_output = "outputs_amazon_full" if amazon else "outputs_kalman_profit_validated"
     amazon_display = ", and Amazon Display" if amazon else ""
     amazon_search = " and Amazon Search" if amazon else ""
+    amazon_billing = "Amazon Display $14 CPM; Amazon Search $2 CPC. " if amazon else ""
     variants = ["outputs", "outputs_stockouts", "outputs_funnel", "outputs_combined"]
     if not all(json.loads((ROOT / folder / "metrics.json").read_text())["overall_pass"] for folder in variants):
         raise ValueError("This verified-run summary requires passing saved reference variants.")
@@ -272,14 +273,13 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
             f"centers. Display, Video, Social, and CTV{amazon_display} have adstock and saturation; "
             f"paid clicks{amazon_search} have no adstock. Social is S-shaped. Tier slopes and transforms remain shared; "
             "no-pooling superiority is untested.",
-            "<b>Funnel.</b> CTV, organic demand, and controls drive branded search. Search has "
-            "log-Normal measurement noise; clicks are Binomial with spend-dependent capture. "
-            f"{('Amazon Search has its own on-platform query/click mediator; Amazon Display is an impression channel. ' if amazon else '')}"
-            "Sales use expected clicks, not observed holdout clicks.",
+            "<b>Funnel.</b> CTV and controls drive branded search; clicks are spend-dependent. "
+            f"{('Amazon Search has a separate query/click path. ' if amazon else '')}"
+            "Sales use expected clicks, not holdout clicks.",
             "<b>Kalman brand state.</b> A jointly estimated 0-100 score follows a linear-Gaussian "
             "logit state process with shocks and noisy score measurements. A Kalman filter updates "
             "states from training scores; nonlinear sales are not Kalman observations.",
-            "<b>New business inputs.</b> Sponsorship has impressions and separate spend at a synthetic "
+            f"<b>New business inputs.</b> {amazon_billing}Sponsorship has impressions and separate spend at a synthetic "
             "$18 CPM. Weekly product distribution is the volume-weighted % of available stores/market "
             "carrying the product, not store count. It is fixed in planning; no separate SKU-breadth variable.",
             f"<b>Sales and decisions.</b> Censored log-Normal sales = min(demand, inventory). {len(channels) + 1} spend "
@@ -288,7 +288,7 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
             "costs; budget and product proportions are fixed. CTV attribution avoids double counting.",
         ]
         if amazon:
-            blocks.insert(4, "<b>Amazon billing assumptions.</b> Amazon Display uses a synthetic $14 CPM; "
+            blocks.insert(3, "<b>Amazon billing assumptions.</b> Amazon Display uses a synthetic $14 CPM; "
                           "Amazon Search uses a synthetic $2 CPC, with zero click charges when there are no clicks.")
     else:
         blocks = [
@@ -309,7 +309,10 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
         "constant weekly shares, fixed product proportions, and channel bounds, retaining carryover.",
         ]
     for text in blocks:
-        left_y = paragraph(pdf, text, left_x, left_y, left_width) - 6
+        left_y = paragraph(
+            pdf, text, left_x, left_y, left_width,
+            size=8.6 if amazon else 9.2, leading=11.0 if amazon else 12.1,
+        ) - (3 if amazon else 6)
 
     right_y = heading(pdf, "COMBINED RUN: EVIDENCE", right_x, y, right_width)
     sampling = metrics["sampling"]
@@ -327,8 +330,8 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
     if amazon:
         amazon_metrics = metrics["amazon"]
         mediator_evidence += (
-            f"; Amazon queries {amazon_metrics['amazon_search_opportunities_holdout_coverage_90']:.1%}; "
-            f"clicks {amazon_metrics['amazon_paid_clicks_holdout_coverage_90']:.1%}"
+            f"; Amazon Q/C {amazon_metrics['amazon_search_opportunities_holdout_coverage_90']:.0%}/"
+            f"{amazon_metrics['amazon_paid_clicks_holdout_coverage_90']:.0%}"
         )
     evidence = [
         ("Sampling reliability", f"R-hat {sampling['max_rhat']:.4f}; {sampling['divergences']} divergences"),
@@ -348,7 +351,7 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
         profit = optimization["profit_optimization"]
         evidence[3] = (
             "Funnel coverage / CTV",
-            f"{mediator_evidence}; CTV lift error {funnel['ctv_mediated_log_lift_relative_error']:.1%}",
+            f"{mediator_evidence}; CTV error {funnel['ctv_mediated_log_lift_relative_error']:.1%}",
         )
         evidence.insert(5, (
             "Brand score holdout",
@@ -409,7 +412,10 @@ def build_pdf(output, results_dir=ROOT / "outputs_combined"):
             "response and lag forms, and joint brand/supply dynamics; require decision value.",
         ]
     for text in roadmap:
-        y = paragraph(pdf, text, margin, y, available, size=9.0, leading=11.5) - 4
+        y = paragraph(
+            pdf, text, margin, y, available,
+            size=8.5 if amazon else 9.0, leading=10.8 if amazon else 11.5,
+        ) - (3 if amazon else 4)
     y -= 4
     boundary = (
         "<b>Boundary:</b> one deliberately informative matched synthetic seed; not independent "

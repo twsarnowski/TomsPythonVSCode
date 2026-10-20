@@ -1,0 +1,393 @@
+{
+  "intercept": 7.783224016336037,
+  "product_effect": [
+    -0.3,
+    0.1,
+    -0.15,
+    0.35
+  ],
+  "tier_effect": [
+    0.0,
+    -0.45,
+    0.45
+  ],
+  "interaction": [
+    [
+      0.01966915458824455,
+      -0.02167307634024193,
+      0.0020039217519973703
+    ],
+    [
+      -0.014348837315778337,
+      0.02860849815052869,
+      -0.014259660834750363
+    ],
+    [
+      0.05013318395392181,
+      -0.045164052141653886,
+      -0.004969131812267931
+    ],
+    [
+      -0.05545350122638804,
+      0.038228630331367135,
+      0.017224870895020908
+    ]
+  ],
+  "media_beta": [
+    0.45,
+    0.65,
+    0.75,
+    0.6,
+    0.45,
+    0.4,
+    0.35
+  ],
+  "decay": [
+    0.25,
+    0.45,
+    0.55,
+    0.65,
+    0.0,
+    0.35,
+    0.0
+  ],
+  "half_saturation": [
+    0.8,
+    1.0,
+    0.7,
+    1.15,
+    0.9,
+    0.95,
+    0.8
+  ],
+  "control_beta": [
+    -1.2,
+    0.9,
+    -0.85,
+    0.16,
+    -0.08,
+    0.19885085874516517,
+    0.15,
+    -0.08
+  ],
+  "sigma": 0.06,
+  "seed": 20261007,
+  "weeks": 156,
+  "channels": [
+    "display",
+    "video",
+    "social",
+    "ctv",
+    "paid_search",
+    "amazon_display",
+    "amazon_search"
+  ],
+  "max_lag_weeks": 13,
+  "hill_power": [
+    1.0,
+    1.0,
+    2.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "unit_cost": [
+    0.004,
+    0.012,
+    0.009,
+    0.022,
+    1.5,
+    0.014,
+    2.0
+  ],
+  "contribution_margin_rate_by_product_tier": [
+    [
+      0.18,
+      0.2,
+      0.16
+    ],
+    [
+      0.22,
+      0.28,
+      0.19
+    ],
+    [
+      0.25,
+      0.3,
+      0.22
+    ],
+    [
+      0.2,
+      0.26,
+      0.18
+    ]
+  ],
+  "profit_assumption": "list price after discount times assumed product-tier contribution margin; excludes tax, returns, fulfillment, and fixed costs",
+  "reference_exposure": [
+    [
+      800000.0,
+      960000.0,
+      800000.0,
+      560000.0,
+      6400.0,
+      720000.0,
+      9600.0
+    ],
+    [
+      1200000.0,
+      1440000.0,
+      1200000.0,
+      840000.0,
+      9600.0,
+      1080000.0,
+      14400.0
+    ],
+    [
+      1000000.0,
+      1200000.0,
+      1000000.0,
+      700000.0,
+      8000.0,
+      900000.0,
+      12000.0
+    ],
+    [
+      1100000.0,
+      1320000.0,
+      1100000.0,
+      770000.0000000001,
+      8800.0,
+      990000.0000000001,
+      13200.000000000002
+    ]
+  ],
+  "product_media_beta": [
+    [
+      0.34010268365507645,
+      0.7939117928041104,
+      0.6455309823187934,
+      0.7704152500126448,
+      0.36113345908311534,
+      0.354768174686863,
+      0.3166930963125858
+    ],
+    [
+      0.5496312411720764,
+      0.5113081096932598,
+      1.0123941056820023,
+      0.5011621268467632,
+      0.5073735832107191,
+      0.4333148270699835,
+      0.3946238980527815
+    ],
+    [
+      0.40717683811618177,
+      0.7328729535265942,
+      0.5841005873035536,
+      0.5429024508215757,
+      0.5778114375094836,
+      0.3843157756609293,
+      0.36428377096733583
+    ],
+    [
+      0.5387478134048146,
+      0.6000256251513133,
+      0.8288781885567358,
+      0.6182727203721101,
+      0.387318589391276,
+      0.4333148270699835,
+      0.32961758675448705
+    ]
+  ],
+  "media_log_deviations": [
+    [
+      -0.28,
+      0.2,
+      -0.15,
+      0.25,
+      -0.22,
+      -0.12,
+      -0.1
+    ],
+    [
+      0.2,
+      -0.24,
+      0.3,
+      -0.18,
+      0.12,
+      0.08,
+      0.12
+    ],
+    [
+      -0.1,
+      0.12,
+      -0.25,
+      -0.1,
+      0.25,
+      -0.04000000000000001,
+      0.04
+    ],
+    [
+      0.18,
+      -0.08,
+      0.1,
+      0.03,
+      -0.15,
+      0.08,
+      -0.06
+    ]
+  ],
+  "hierarchical_media_design": "predeclared zero-sum product log deviations; population coefficient is geometric center",
+  "search_intercept": [
+    11.06663836234181,
+    11.472103470449973,
+    11.289781913656018,
+    11.385092093460344
+  ],
+  "search_ctv_beta": 0.65,
+  "search_control_beta": [
+    0.45,
+    0.1,
+    -0.08,
+    0.7
+  ],
+  "search_sigma": 0.08,
+  "click_max_rate": 0.25,
+  "click_budget_half": 0.7,
+  "funnel_design": {
+    "seed": 20261907,
+    "search_family": "rounded log-Normal",
+    "click_family": "Binomial conditional on observed searches and exogenous paid spend",
+    "organic_index": "independent observed search-demand driver",
+    "paid_budget_reference": "paid-search reference clicks times nominal CPC",
+    "sales_driver": "latent search intensity times spend-dependent capture probability",
+    "attribution_convention": "CTV receives direct plus mediated log lift; paid search receives no-CTV click log lift"
+  },
+  "amazon_search_intercept": [
+    11.289781913656018,
+    11.695247021764184,
+    11.512925464970229,
+    11.608235644774554
+  ],
+  "amazon_search_control_beta": [
+    0.35,
+    0.08,
+    -0.06,
+    0.65
+  ],
+  "amazon_search_sigma": 0.09,
+  "amazon_click_max_rate": 0.22,
+  "amazon_click_budget_half": 0.65,
+  "amazon_search_design": {
+    "seed": 20262307,
+    "search_family": "rounded log-Normal query opportunities",
+    "click_family": "Binomial conditional on on-Amazon query opportunities and synthetic CPC budget activity",
+    "billing": "synthetic CPC; realized spend equals valid paid clicks times nominal CPC",
+    "budget_activity": "planned spend-equivalent activity index controls click capture",
+    "sales_driver": "latent query intensity times spend-dependent click capture",
+    "organic_index": "independent exogenous product-query demand driver"
+  },
+  "brand_intercept": -0.35,
+  "brand_product_effect": [
+    -0.2,
+    0.1,
+    -0.05,
+    0.15
+  ],
+  "brand_initial": [
+    -0.2,
+    0.1,
+    -0.05,
+    0.15
+  ],
+  "brand_media_beta": [
+    0.35,
+    0.5,
+    0.6,
+    0.45,
+    0.3,
+    0.38,
+    0.28
+  ],
+  "brand_sponsorship_beta": 0.45,
+  "brand_distribution_beta": 0.9,
+  "brand_persistence": 0.9,
+  "brand_process_sigma": 0.025,
+  "brand_measurement_sigma": 0.025,
+  "brand_sales_beta": 0.08,
+  "sponsorship_reference": [
+    640000.0,
+    960000.0,
+    800000.0,
+    880000.0000000001
+  ],
+  "sponsorship_cpm": 18.0,
+  "brand_design": {
+    "seed": 20262107,
+    "score_scale": "0-100 logistic-normal survey score",
+    "state": "logit autoregression with Gaussian process innovations and noisy measurements",
+    "distribution": "100 * covered-store volume / available-store volume",
+    "available_store_volume_weights": [
+      0.42161238888115754,
+      1.9170486342153743,
+      1.2146208471782434,
+      0.8402695731992522,
+      0.6792716597758631,
+      0.9459878289959625,
+      0.8824050041491934,
+      0.5797776896430056,
+      0.5449701640025073,
+      1.263975144869421,
+      1.073970417961968,
+      0.2879131874137949,
+      0.43563539802459406,
+      1.1393851242551996,
+      2.2139581618006585,
+      1.2429117668485583,
+      2.3822716322514728,
+      1.3465139251590204,
+      1.3848999721618471,
+      1.7272033504326927,
+      0.131957089319267,
+      2.140375328727987,
+      0.3937878801244087,
+      0.5158419961153351,
+      2.67510889331245,
+      1.3683508514453218,
+      1.2337976985098065,
+      0.6615488409025513,
+      0.6736801242780668,
+      0.5334496223584478,
+      0.6330905967607957,
+      1.0385639415627912,
+      2.3264297270898266,
+      0.885362208512435,
+      2.368079956162953,
+      2.0625936275171735,
+      2.0944864249183714,
+      1.0318008171332795,
+      1.2384534414749675,
+      0.918920570256669
+    ],
+    "assortment": "captured by product distribution coverage; no separate SKU breadth",
+    "sales": "previous-week score relative to 50, scaled per 10 points"
+  },
+  "stockout_design": {
+    "inventory_seed": 20261707,
+    "product_event_probabilities": [
+      0.12,
+      0.16,
+      0.08,
+      0.1
+    ],
+    "tier_probability_adjustments": [
+      0.0,
+      -0.02,
+      0.03
+    ],
+    "supply_disruption_probability_increment": 0.25,
+    "disruption_length_weeks": 4,
+    "cap_rule": "conditional demand quantile plus independent supply variation; not realized demand"
+  }
+}

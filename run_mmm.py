@@ -139,7 +139,9 @@ def build_model(data, train_weeks):
             )
             click_ratio = pt.exp(search_log_mean) * capture / data["reference"][:, 4:5]
             click_feature = click_ratio / (click_ratio + half[4])
-            features = pt.concatenate([features[:, :, :4], click_feature[:, :, None]], axis=2)
+            features = pt.concatenate([
+                features[:, :, :4], click_feature[:, :, None], features[:, :, 5:]
+            ], axis=2)
         if data["amazon"]:
             amazon_search_intercept = pm.Normal(
                 "amazon_search_intercept",
@@ -1656,7 +1658,7 @@ heterogeneity. This adds hierarchical shrinkage of media coefficients, not just 
 Product media truths covered by 90% intervals: {recovery['product_media_truths_covered']}/{recovery['product_media_total']}.
 Maximum product media coefficient relative error: {recovery['max_product_media_relative_error']:.1%}.
 The product-recovery gate uses the same 25% maximum coefficient error tolerance and at least
-80% truth inclusion, now evaluated over 20 product-by-channel coefficients. The planted
+80% truth inclusion, now evaluated over {recovery['product_media_total']} product-by-channel coefficients. The planted
 product deviations were declared before fitting; priors are not centered on those truths.
 
 Attribution, CTV-mediated lift, response curves, and allocation all use product coefficients.
@@ -1676,8 +1678,8 @@ Brand equity is a measured 0-100 score and a persistent latent logit state, not 
 outcome disconnected from sales. Each product has one weekly score measurement shared across
 its tiers. A logistic-normal measurement likelihood is jointly fitted with sales and mediators.
 The state blends its prior state with a target driven by {5 + (2 if args.amazon else 0)} media response features,
-current sponsorship impressions, and distribution coverage. Measurement noise is estimated;
-there are no unobserved process innovations in this first deterministic-state version.
+current sponsorship impressions, and distribution coverage. Measurement noise and Gaussian
+process innovations are estimated; the latent state is stochastic.
 
 Sponsorship is an impression measure with a separate spend column at a known synthetic $18 CPM.
 It affects baseline sales through brand equity, not a new immediate-sales coefficient. Volume-
